@@ -1,0 +1,15 @@
+node_modules/
+dist/
+target/
+.vite/
+.tools/
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.tsbuildinfo
+.env
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/target/
+outputs/*.exe
+outputs/*.msi

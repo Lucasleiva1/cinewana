@@ -1,0 +1,28 @@
+[package]
+name = "cine-wana-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CINE WANA desktop application"
+
+[lib]
+name = "cine_wana_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow.workspace = true
+cinewana-core = { path = "../../../crates/cinewana-core" }
+cinewana-database = { path = "../../../crates/cinewana-database" }
+cinewana-player = { path = "../../../crates/cinewana-player" }
+cinewana-scanner = { path = "../../../crates/cinewana-scanner" }
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tokio.workspace = true
+uuid.workspace = true
+

@@ -1,0 +1,18 @@
+{
+  "name": "cine-wana",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.13.1",
+  "scripts": {
+    "dev": "corepack pnpm --filter @cine-wana/desktop dev",
+    "desktop:dev": "corepack pnpm --filter @cine-wana/desktop tauri dev",
+    "desktop:build": "corepack pnpm --filter @cine-wana/desktop tauri build",
+    "build": "corepack pnpm -r build",
+    "test": "corepack pnpm -r test",
+    "lint": "corepack pnpm -r lint",
+    "typecheck": "corepack pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "typescript": "~5.8.3"
+  }
+}
