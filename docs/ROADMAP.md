@@ -22,11 +22,18 @@
 - Windows Play actions now default to Windows Media Player when the installed mpv build is not compatible with the machine
 - mpv remains available behind `CINE_WANA_USE_MPV=1` for future embedded-player testing
 
+## Implemented for the internal player pass
+
+- Play actions now open an in-app CINE WANA player first, with external playback kept as an explicit option
+- Internal playback saves watch progress through the existing `watch_progress` database path for continue/resume behavior
+- Added playback-only controls: play/pause, seek, restart, volume, mute, fullscreen, and close
+- Added non-destructive image scanning and runtime adjustments for brightness, contrast, saturation, shadows, highlights, and temperature
+
 ## Pending after the functional media pass
 
 - File-system watcher/debounce and scan concurrency tuning
 - Local NFO/images, optional TMDB official posters, and manual match correction
-- Fine-grained audio/subtitle selectors, progress polling, and image profiles
+- Fine-grained audio/subtitle selectors and persisted image profiles
 - Final visual refinements after the functional player is reviewed
 - Backup/export diagnostics and hardening
 - NSIS installer (explicitly postponed until after the development review)
