@@ -67,6 +67,8 @@ pub struct MediaSummary {
     pub offline: bool,
     pub added_at: String,
     pub artwork_url: Option<String>,
+    pub backdrop_url: Option<String>,
+    pub preview_url: Option<String>,
     pub technical: MediaTechnical,
 }
 
@@ -125,7 +127,14 @@ pub struct CatalogQuery {
 
 impl Default for CatalogQuery {
     fn default() -> Self {
-        Self { search: None, kind: None, filter: None, sort: Some("added_desc".into()), limit: Some(500), offset: Some(0) }
+        Self {
+            search: None,
+            kind: None,
+            filter: None,
+            sort: Some("added_desc".into()),
+            limit: Some(500),
+            offset: Some(0),
+        }
     }
 }
 
@@ -178,7 +187,19 @@ pub struct ImageProfile {
 
 impl Default for ImageProfile {
     fn default() -> Self {
-        Self { brightness: 0.0, contrast: 0.0, gamma: 0.0, saturation: 0.0, hue: 0.0, temperature: 0.0, shadows: 0.0, highlights: 0.0, black_level: 0.0, sharpness: 0.0, noise_reduction: 0.0 }
+        Self {
+            brightness: 0.0,
+            contrast: 0.0,
+            gamma: 0.0,
+            saturation: 0.0,
+            hue: 0.0,
+            temperature: 0.0,
+            shadows: 0.0,
+            highlights: 0.0,
+            black_level: 0.0,
+            sharpness: 0.0,
+            noise_reduction: 0.0,
+        }
     }
 }
 
@@ -232,35 +253,79 @@ pub struct ParsedMediaName {
 }
 
 pub fn is_supported_video(path: &Path) -> bool {
-    path.extension().and_then(|v| v.to_str()).map(|v| SUPPORTED_EXTENSIONS.contains(&v.to_ascii_lowercase().as_str())).unwrap_or(false)
+    path.extension()
+        .and_then(|v| v.to_str())
+        .map(|v| SUPPORTED_EXTENSIONS.contains(&v.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
 }
 
 pub fn parse_media_name(path: &Path) -> ParsedMediaName {
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
     let normalized = stem.replace(['.', '_'], " ");
     let episode_re = Regex::new(r"(?i)^(?P<series>.*?)[\s.-]*(?:S(?P<s>\d{1,2})E(?P<e>\d{1,3})|(?P<s2>\d{1,2})x(?P<e2>\d{1,3}))(?:\b|[\s._-])").unwrap();
     if let Some(caps) = episode_re.captures(&normalized) {
         let series = clean_title(caps.name("series").map(|m| m.as_str()).unwrap_or_default());
-        let season = caps.name("s").or_else(|| caps.name("s2")).and_then(|m| m.as_str().parse().ok());
-        let episode = caps.name("e").or_else(|| caps.name("e2")).and_then(|m| m.as_str().parse().ok());
+        let season = caps
+            .name("s")
+            .or_else(|| caps.name("s2"))
+            .and_then(|m| m.as_str().parse().ok());
+        let episode = caps
+            .name("e")
+            .or_else(|| caps.name("e2"))
+            .and_then(|m| m.as_str().parse().ok());
         let year = extract_year(&normalized);
-        return ParsedMediaName { kind: MediaKind::Episode, title: format!("Episodio {}", episode.unwrap_or_default()), year, series_title: Some(series.clone()), season_number: season, episode_number: episode };
+        return ParsedMediaName {
+            kind: MediaKind::Episode,
+            title: format!("Episodio {}", episode.unwrap_or_default()),
+            year,
+            series_title: Some(series.clone()),
+            season_number: season,
+            episode_number: episode,
+        };
     }
     let year = extract_year(&normalized);
-    let before_year = if let Some(year) = year { normalized.split(&year.to_string()).next().unwrap_or(&normalized) } else { normalized.as_str() };
-    ParsedMediaName { kind: MediaKind::Movie, title: clean_title(before_year), year, series_title: None, season_number: None, episode_number: None }
+    let before_year = if let Some(year) = year {
+        normalized
+            .split(&year.to_string())
+            .next()
+            .unwrap_or(&normalized)
+    } else {
+        normalized.as_str()
+    };
+    ParsedMediaName {
+        kind: MediaKind::Movie,
+        title: clean_title(before_year),
+        year,
+        series_title: None,
+        season_number: None,
+        episode_number: None,
+    }
 }
 
 fn extract_year(value: &str) -> Option<i32> {
-    Regex::new(r"(?:^|\D)((?:19|20)\d{2})(?:\D|$)").unwrap().captures(value).and_then(|c| c.get(1)).and_then(|m| m.as_str().parse().ok())
+    Regex::new(r"(?:^|\D)((?:19|20)\d{2})(?:\D|$)")
+        .unwrap()
+        .captures(value)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse().ok())
 }
 
 fn clean_title(value: &str) -> String {
     let noise = Regex::new(r"(?i)\b(?:2160p|1080p|720p|480p|uhd|bluray|brrip|webrip|web-dl|x26[45]|h26[45]|hevc|hdr10?|dv|dual|latino|lat|castellano|aac|dts|ac3)\b.*$").unwrap();
     let stripped = noise.replace(value, "");
     let spaces = Regex::new(r"\s+").unwrap();
-    let cleaned = spaces.replace_all(stripped.trim_matches(|c: char| c.is_whitespace() || "-._[]()".contains(c)), " ");
-    if cleaned.is_empty() { "Sin título".into() } else { cleaned.to_string() }
+    let cleaned = spaces.replace_all(
+        stripped.trim_matches(|c: char| c.is_whitespace() || "-._[]()".contains(c)),
+        " ",
+    );
+    if cleaned.is_empty() {
+        "Sin título".into()
+    } else {
+        cleaned.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -277,11 +342,12 @@ mod tests {
 
     #[test]
     fn parses_unicode_series_episode() {
-        let parsed = parse_media_name(Path::new("La.Casa.Del.Dragón.S03e02.2026.1080P-Dual-Lat.mkv"));
+        let parsed = parse_media_name(Path::new(
+            "La.Casa.Del.Dragón.S03e02.2026.1080P-Dual-Lat.mkv",
+        ));
         assert_eq!(parsed.kind, MediaKind::Episode);
         assert_eq!(parsed.series_title.as_deref(), Some("La Casa Del Dragón"));
         assert_eq!(parsed.season_number, Some(3));
         assert_eq!(parsed.episode_number, Some(2));
     }
 }
-

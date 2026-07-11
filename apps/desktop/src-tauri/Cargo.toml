@@ -21,8 +21,7 @@ cinewana-scanner = { path = "../../../crates/cinewana-scanner" }
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset", "unstable"] }
 tauri-plugin-dialog = "2"
 tokio.workspace = true
 uuid.workspace = true
-

@@ -8,8 +8,7 @@ Requirements are checked by `scripts/setup-windows.ps1`. It installs/project-pro
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/setup-windows.ps1
-pnpm install
-pnpm desktop:dev
+powershell -ExecutionPolicy Bypass -File scripts/run-dev.ps1
 ```
 
 ## Verification
@@ -22,4 +21,3 @@ pnpm desktop:build
 ```
 
 The initial media root is `D:\peliculas-y-series`. It is only seeded for a new database and can be replaced from Settings. CINE WANA never moves, deletes, renames, or rewrites media files.
-
