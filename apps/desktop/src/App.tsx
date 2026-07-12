@@ -238,15 +238,17 @@ function CarouselRow({label,children}:{label:string;children:React.ReactNode}){
     const row=rowRef.current;
     if(!row||row.scrollWidth<=row.clientWidth)return;
     drag.current={active:true,pointerId:event.pointerId,startX:event.clientX,scrollLeft:row.scrollLeft,moved:false};
-    row.setPointerCapture(event.pointerId);
-    setDragging(true);
   };
   const moveDrag=(event:React.PointerEvent<HTMLDivElement>)=>{
     const row=rowRef.current;
     const state=drag.current;
     if(!row||!state.active||state.pointerId!==event.pointerId)return;
     const delta=event.clientX-state.startX;
-    if(Math.abs(delta)>4)state.moved=true;
+    if(Math.abs(delta)>4&&!state.moved){
+      state.moved=true;
+      row.setPointerCapture(event.pointerId);
+      setDragging(true);
+    }
     if(state.moved){
       row.scrollLeft=state.scrollLeft-delta;
       event.preventDefault();

@@ -47,6 +47,7 @@
 - Built the first signed Windows x64 NSIS installer and updater signature assets for version 0.1.0
 - Prepared version 0.1.2 to publish a signed GitHub updater release and hide the Windows console host in installed builds
 - Prepared version 0.1.3 as the signed updater release for carousel navigation and automatic sequel handoff
+- Prepared version 0.1.4 to keep carousel drag navigation while preserving normal card click/play behavior
 
 ## Implemented for richer title pages
 
