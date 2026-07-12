@@ -44,6 +44,7 @@
 - Added a manual update check/install surface in Settings
 - Added release-asset documentation and a helper script for creating `latest.json` from signed NSIS artifacts
 - Built the first signed Windows x64 NSIS installer and updater signature assets for version 0.1.0
+- Prepared version 0.1.2 to publish a signed GitHub updater release and hide the Windows console host in installed builds
 
 ## Implemented for richer title pages
 
