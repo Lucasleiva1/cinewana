@@ -1,8 +1,10 @@
 use cinewana_core::{
-    BootstrapDto, CatalogQuery, DEFAULT_LIBRARY_ROOT, MediaDetail, MediaSummary, PlayerCommand,
-    PlayerState, ScanProgress,
+    AccountDto, BootstrapDto, CatalogQuery, DEFAULT_LIBRARY_ROOT, MediaDetail,
+    MediaMetadataCandidate, MediaMetadataUpdate, MediaSummary, PlayerCommand, PlayerState,
+    ScanProgress,
 };
-use cinewana_database::Database;
+use cinewana_database::{Database, MetadataImportTarget};
+use cinewana_metadata::{MetadataSearchOutcome, WikipediaMetadataClient};
 use cinewana_player::PlayerService;
 use parking_lot::Mutex;
 use std::{
@@ -24,18 +26,59 @@ struct AppServices {
     ffmpeg: Option<PathBuf>,
     ffprobe: Option<PathBuf>,
     cache_dir: PathBuf,
+    metadata: Arc<WikipediaMetadataClient>,
     player: Arc<PlayerService>,
 }
 
 #[tauri::command]
 fn bootstrap(state: State<'_, AppServices>) -> Result<BootstrapDto, String> {
+    let active_account = state.db.active_account().map_err(error_string)?;
+    let home = if let Some(account) = active_account.as_ref() {
+        state
+            .db
+            .home(Some(account.id.as_str()))
+            .map_err(error_string)?
+    } else {
+        Default::default()
+    };
     Ok(BootstrapDto {
         roots: state.db.roots(true).map_err(error_string)?,
         scan: state.progress.lock().clone(),
-        home: state.db.home().map_err(error_string)?,
+        home,
+        accounts: state.db.accounts().map_err(error_string)?,
+        active_account,
         ffprobe_available: state.ffprobe.is_some(),
         player_available: state.player.available(),
     })
+}
+
+#[tauri::command]
+fn create_account(
+    name: String,
+    password: String,
+    state: State<'_, AppServices>,
+) -> Result<AccountDto, String> {
+    state
+        .db
+        .create_account(&name, &password)
+        .map_err(error_string)
+}
+
+#[tauri::command]
+fn login_account(
+    name: String,
+    password: String,
+    state: State<'_, AppServices>,
+) -> Result<AccountDto, String> {
+    state
+        .db
+        .login_account(&name, &password)
+        .map_err(error_string)
+}
+
+#[tauri::command]
+fn logout_account(state: State<'_, AppServices>) -> Result<(), String> {
+    state.db.logout_account().map_err(error_string)
 }
 
 #[tauri::command]
@@ -43,15 +86,73 @@ fn catalog(
     query: Option<CatalogQuery>,
     state: State<'_, AppServices>,
 ) -> Result<Vec<MediaSummary>, String> {
+    let account_id = state.db.require_active_account_id().map_err(error_string)?;
     state
         .db
-        .catalog(&query.unwrap_or_default())
+        .catalog(Some(&account_id), &query.unwrap_or_default())
         .map_err(error_string)
 }
 
 #[tauri::command]
 fn media_detail(id: String, state: State<'_, AppServices>) -> Result<Option<MediaDetail>, String> {
-    state.db.media_detail(&id).map_err(error_string)
+    let account_id = state.db.require_active_account_id().map_err(error_string)?;
+    state
+        .db
+        .media_detail(Some(&account_id), &id)
+        .map_err(error_string)
+}
+
+#[tauri::command]
+fn update_media_metadata(
+    media_id: String,
+    metadata: MediaMetadataUpdate,
+    state: State<'_, AppServices>,
+) -> Result<(), String> {
+    state
+        .db
+        .update_media_metadata(&media_id, &metadata)
+        .map_err(error_string)
+}
+
+#[tauri::command]
+async fn refresh_media_metadata(
+    media_id: String,
+    state: State<'_, AppServices>,
+) -> Result<(), String> {
+    let target = state
+        .db
+        .metadata_target(&media_id)
+        .map_err(error_string)?
+        .ok_or_else(|| "No se encontró el archivo para buscar información".to_string())?;
+    import_metadata_for_target(state.inner(), &target)
+        .await
+        .map_err(error_string)
+}
+
+#[tauri::command]
+async fn apply_metadata_candidate(
+    media_id: String,
+    candidate: MediaMetadataCandidate,
+    state: State<'_, AppServices>,
+) -> Result<(), String> {
+    let target = state
+        .db
+        .metadata_target(&media_id)
+        .map_err(error_string)?
+        .ok_or_else(|| "No se encontró el archivo para guardar información".to_string())?;
+    let metadata = state
+        .metadata
+        .import_candidate(&candidate)
+        .await
+        .map_err(error_string)?
+        .ok_or_else(|| "No se pudo leer esa página de Wikipedia".to_string())?;
+    let json_path =
+        cinewana_metadata::write_metadata_json(&state.cache_dir, &target.fingerprint, &metadata)
+            .map_err(error_string)?;
+    state
+        .db
+        .apply_imported_metadata(&media_id, &metadata, Some(&json_path.to_string_lossy()))
+        .map_err(error_string)
 }
 
 #[tauri::command]
@@ -61,9 +162,10 @@ fn set_media_flag(
     value: bool,
     state: State<'_, AppServices>,
 ) -> Result<(), String> {
+    let account_id = state.db.require_active_account_id().map_err(error_string)?;
     state
         .db
-        .set_flag(&media_id, &flag, value)
+        .set_flag(&account_id, &media_id, &flag, value)
         .map_err(error_string)
 }
 
@@ -74,9 +176,10 @@ fn save_progress(
     duration_ms: i64,
     state: State<'_, AppServices>,
 ) -> Result<(), String> {
+    let account_id = state.db.require_active_account_id().map_err(error_string)?;
     state
         .db
-        .save_progress(&media_id, position_ms, duration_ms)
+        .save_progress(&account_id, &media_id, position_ms, duration_ms)
         .map_err(error_string)
 }
 
@@ -149,7 +252,11 @@ fn player_command(
         _ => None,
     };
     let (title, path) = if let Some(id) = media_id {
-        let detail = state.db.media_detail(&id).map_err(error_string)?;
+        let account_id = state.db.require_active_account_id().map_err(error_string)?;
+        let detail = state
+            .db
+            .media_detail(Some(&account_id), &id)
+            .map_err(error_string)?;
         let title = detail.as_ref().map(|d| d.summary.title.clone());
         let path = state
             .db
@@ -222,6 +329,41 @@ fn spawn_scan(app: AppHandle, services: AppServices, reason: String) {
         }
         services.running.store(false, Ordering::SeqCst);
     });
+}
+
+async fn import_metadata_for_target(
+    services: &AppServices,
+    target: &MetadataImportTarget,
+) -> anyhow::Result<()> {
+    let outcome = services
+        .metadata
+        .search_movie(&target.title, target.year)
+        .await?;
+    match outcome {
+        MetadataSearchOutcome::Imported(metadata) => {
+            let json_path = cinewana_metadata::write_metadata_json(
+                &services.cache_dir,
+                &target.fingerprint,
+                &metadata,
+            )?;
+            services.db.apply_imported_metadata(
+                &target.media_id,
+                &metadata,
+                Some(&json_path.to_string_lossy()),
+            )?;
+        }
+        MetadataSearchOutcome::Ambiguous(candidates) => {
+            services
+                .db
+                .store_metadata_candidates(&target.media_id, &candidates)?;
+        }
+        MetadataSearchOutcome::NotFound => {
+            services
+                .db
+                .store_metadata_candidates(&target.media_id, &[])?;
+        }
+    }
+    Ok(())
 }
 
 async fn run_scan(app: &AppHandle, services: &AppServices, reason: &str) -> anyhow::Result<()> {
@@ -330,6 +472,23 @@ async fn run_scan(app: &AppHandle, services: &AppServices, reason: &str) -> anyh
                                     }
                                 }
                                 Err(_) => local_errors += 1,
+                            }
+                        }
+                        if services
+                            .db
+                            .should_auto_import_metadata(&outcome.media_id)
+                            .unwrap_or(false)
+                        {
+                            if let Ok(Some(target)) = services.db.metadata_target(&outcome.media_id)
+                            {
+                                {
+                                    let mut p = services.progress.lock();
+                                    p.message =
+                                        Some(format!("Buscando información: {}", target.file_name));
+                                    let _ = app.emit("scan-progress", p.clone());
+                                }
+                                let _ = import_metadata_for_target(services, &target).await;
+                                tokio::time::sleep(std::time::Duration::from_millis(350)).await;
                             }
                         }
                     }
@@ -446,6 +605,7 @@ fn error_string(error: impl std::fmt::Display) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let app_data = app.path().app_data_dir()?;
             let db = Arc::new(Database::open(app_data.join("cine-wana.db"))?);
@@ -459,6 +619,7 @@ pub fn run() {
                 ffmpeg,
                 ffprobe: find_command("ffprobe"),
                 cache_dir: app_data.join("cache"),
+                metadata: Arc::new(WikipediaMetadataClient::new()?),
                 player: Arc::new(PlayerService::discover()),
             };
             app.manage(services.clone());
@@ -471,8 +632,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap,
+            create_account,
+            login_account,
+            logout_account,
             catalog,
             media_detail,
+            update_media_metadata,
+            refresh_media_metadata,
+            apply_metadata_candidate,
             set_media_flag,
             save_progress,
             scan_status,

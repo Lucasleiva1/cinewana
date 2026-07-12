@@ -102,25 +102,12 @@ pub async fn generate_artwork(
     let poster = posters.join(format!("{key}.jpg"));
     let backdrop = backdrops.join(format!("{key}.jpg"));
     let preview = previews.join(format!("{key}.mp4"));
-    let seek_seconds = duration_ms
-        .map(|ms| (ms as f64 / 1000.0 * 0.12).clamp(30.0, 600.0))
-        .unwrap_or(60.0);
-    let seek = format!("{seek_seconds:.3}");
-
+    let seek_points = seek_points(duration_ms);
     if !valid_cache_file(&backdrop, 8_000) {
-        run_ffmpeg(
+        generate_frame(
             ffmpeg,
-            &[
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-nostdin",
-                "-y",
-                "-ss",
-                &seek,
-                "-i",
-            ],
             video,
+            &seek_points,
             &[
                 "-map",
                 "0:v:0",
@@ -136,19 +123,10 @@ pub async fn generate_artwork(
         .await?;
     }
     if !valid_cache_file(&poster, 8_000) {
-        run_ffmpeg(
+        generate_frame(
             ffmpeg,
-            &[
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-nostdin",
-                "-y",
-                "-ss",
-                &seek,
-                "-i",
-            ],
             video,
+            &seek_points,
             &[
                 "-map",
                 "0:v:0",
@@ -164,7 +142,8 @@ pub async fn generate_artwork(
         .await?;
     }
     if !valid_cache_file(&preview, 24_000) {
-        run_ffmpeg(
+        let seek = format!("{:.3}", seek_points[0]);
+        let _ = run_ffmpeg(
             ffmpeg,
             &[
                 "-hide_banner",
@@ -198,9 +177,71 @@ pub async fn generate_artwork(
             ],
             &preview,
         )
-        .await?;
+        .await;
     }
-    Ok((poster, backdrop, preview))
+    Ok((
+        poster,
+        backdrop,
+        if valid_cache_file(&preview, 24_000) {
+            preview
+        } else {
+            PathBuf::new()
+        },
+    ))
+}
+
+fn seek_points(duration_ms: Option<i64>) -> Vec<f64> {
+    let Some(duration_ms) = duration_ms else {
+        return vec![30.0, 60.0, 120.0, 10.0, 2.0];
+    };
+    let duration = duration_ms as f64 / 1000.0;
+    if duration <= 2.0 {
+        return vec![0.2, 0.8, 1.2];
+    }
+    let end_safe = (duration - 1.0).max(1.0);
+    [0.12, 0.35, 0.6, 0.82]
+        .into_iter()
+        .map(|ratio| (duration * ratio).clamp(1.0, end_safe))
+        .collect()
+}
+
+async fn generate_frame(
+    ffmpeg: &Path,
+    video: &Path,
+    seek_points: &[f64],
+    suffix: &[&str],
+    output: &Path,
+) -> Result<()> {
+    let mut last_error = None;
+    for seek_seconds in seek_points {
+        let seek = format!("{seek_seconds:.3}");
+        match run_ffmpeg(
+            ffmpeg,
+            &[
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-y",
+                "-ss",
+                &seek,
+                "-i",
+            ],
+            video,
+            suffix,
+            output,
+        )
+        .await
+        {
+            Ok(()) if valid_cache_file(output, 8_000) => return Ok(()),
+            Ok(()) => {
+                let _ = std::fs::remove_file(output);
+                last_error = Some(anyhow::anyhow!("generated frame was too small"));
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no usable frame generated")))
 }
 
 async fn run_ffmpeg(

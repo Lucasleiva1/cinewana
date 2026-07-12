@@ -3,6 +3,5 @@
   "identifier": "default",
   "description": "CINE WANA desktop permissions",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save"]
+  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save", "updater:default"]
 }
-

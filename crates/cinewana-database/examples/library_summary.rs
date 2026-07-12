@@ -6,13 +6,13 @@ fn main() -> anyhow::Result<()> {
         .nth(1)
         .ok_or_else(|| anyhow::anyhow!("usage: library_summary <database-path>"))?;
     let db = Database::open(path)?;
-    let items = db.catalog(&CatalogQuery::default())?;
+    let items = db.catalog(None, &CatalogQuery::default())?;
     let movies = items
         .iter()
         .filter(|m| matches!(m.kind, cinewana_core::MediaKind::Movie))
         .count();
     let episodes = items.len() - movies;
-    let series = db.home()?.series.len();
+    let series = db.home(None)?.series.len();
     let artwork = items
         .iter()
         .filter(|item| item.artwork_url.is_some())

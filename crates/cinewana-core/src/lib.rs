@@ -38,6 +38,13 @@ pub struct LibraryRootDto {
     pub local_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountDto {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaTechnical {
@@ -94,9 +101,51 @@ pub struct MediaDetail {
     pub summary: MediaSummary,
     pub overview: Option<String>,
     pub genres: Vec<String>,
+    pub cast: Vec<String>,
     pub runtime_ms: Option<i64>,
     pub tracks: Vec<MediaTrack>,
     pub file_name: String,
+    pub manual_metadata: bool,
+    pub metadata_status: String,
+    pub metadata_source_url: Option<String>,
+    pub metadata_imported_at: Option<String>,
+    pub metadata_candidates: Vec<MediaMetadataCandidate>,
+    pub recommendations: Vec<MediaSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaMetadataCandidate {
+    pub id: String,
+    pub language: String,
+    pub page_id: i64,
+    pub title: String,
+    pub year: Option<i32>,
+    pub description: Option<String>,
+    pub source_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaMetadataUpdate {
+    pub title: String,
+    pub year: Option<i32>,
+    pub overview: Option<String>,
+    pub genres: Vec<String>,
+    pub cast: Vec<String>,
+    pub poster_path: Option<String>,
+    pub backdrop_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedMediaMetadata {
+    pub title: String,
+    pub year: Option<i32>,
+    pub overview: Option<String>,
+    pub cast: Vec<String>,
+    pub source_url: String,
+    pub source_language: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -138,7 +187,7 @@ impl Default for CatalogQuery {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct HomeDto {
     pub heroes: Vec<MediaSummary>,
@@ -165,6 +214,8 @@ pub struct BootstrapDto {
     pub roots: Vec<LibraryRootDto>,
     pub scan: ScanProgress,
     pub home: HomeDto,
+    pub accounts: Vec<AccountDto>,
+    pub active_account: Option<AccountDto>,
     pub ffprobe_available: bool,
     pub player_available: bool,
 }

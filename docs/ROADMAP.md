@@ -29,14 +29,38 @@
 - Added playback-only controls: play/pause, seek, restart, volume, mute, fullscreen, and close
 - Added non-destructive image scanning and runtime adjustments for brightness, contrast, saturation, shadows, highlights, and temperature
 
+## Implemented for local account profiles
+
+- Added local account creation and login with name plus a 4-10 character alphanumeric password
+- Stored local account passwords as salted hashes instead of plaintext
+- Scoped continue/resume progress, completion, history, favorites, and Mi lista to the active account
+- Added a first-run account screen and session controls in the desktop UI
+- Migrated any legacy global watch state into the first local account created
+
+## Prepared for signed GitHub updates
+
+- Added the Tauri updater plugin, static GitHub Releases endpoint, and Windows x64 updater permissions
+- Generated a local updater signing key outside the repository and embedded only the public key
+- Added a manual update check/install surface in Settings
+- Added release-asset documentation and a helper script for creating `latest.json` from signed NSIS artifacts
+- Built the first signed Windows x64 NSIS installer and updater signature assets for version 0.1.0
+
+## Implemented for richer title pages
+
+- Artwork generation now keeps poster/backdrop frames even when an eight-second video preview cannot be encoded
+- Scanner tries several timestamps so short or difficult videos still get a usable still image when possible
+- Detail pages now include editable description, year, genres, cast, poster, and backdrop
+- Title cards keep center play behavior, while the title text opens the full title page
+- Added local genre-based recommendations and starter genre inference from filenames/paths
+- Added a no-key Wikipedia metadata importer in the Rust backend, with Spanish-first lookup, English fallback, cast extraction, source URL, cached metadata JSON, manual retry, and ambiguity selection
+
 ## Pending after the functional media pass
 
 - File-system watcher/debounce and scan concurrency tuning
-- Local NFO/images, optional TMDB official posters, and manual match correction
+- Local NFO/images, optional TMDB official posters, richer online posters, and manual match correction
 - Fine-grained audio/subtitle selectors and persisted image profiles
 - Final visual refinements after the functional player is reviewed
 - Backup/export diagnostics and hardening
-- NSIS installer (explicitly postponed until after the development review)
 
 ## Deferred
 

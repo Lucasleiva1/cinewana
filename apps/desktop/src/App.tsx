@@ -2,14 +2,19 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
+import { check } from '@tauri-apps/plugin-updater';
 import {
   Bookmark, Check, ChevronLeft, ChevronRight, CircleAlert, Clock3, Film, FolderCog, Heart, History,
-  Home, Library, ListVideo, LoaderCircle, Play, RefreshCw, Search, Settings, Star, Tv, X
+  Home, ImagePlus, KeyRound, Library, ListVideo, LoaderCircle, LogOut, Pencil, Play, RefreshCw, Save,
+  Search, Settings, Star, Tags, Tv, UserRound, Users, X
 } from 'lucide-react';
-import type { Bootstrap, HomeDto, MediaDetail, MediaSummary, ScanProgress, SeriesSummary } from './types';
+import type { Bootstrap, HomeDto, MediaDetail, MediaMetadataCandidate, MediaMetadataUpdate, MediaSummary, ScanProgress, SeriesSummary } from './types';
 import { InternalPlayer, type InternalPlayerSource } from './InternalPlayer';
 
 type Page = 'Inicio'|'Películas'|'Series'|'Continuar viendo'|'Mi lista'|'Favoritos'|'Agregadas recientemente'|'Historial'|'Configuración';
+type AuthMode = 'create'|'login';
+type PendingAccount = { name:string; password:string };
+type PendingUpdate = Awaited<ReturnType<typeof check>>;
 const emptyHome: HomeDto = { heroes:[],continueWatching:[],recentlyAdded:[],movies:[],series:[],favorites:[] };
 const emptyScan: ScanProgress = {running:false,cancelRequested:false,found:0,processed:0,skipped:0,errors:0,percent:0};
 
@@ -21,6 +26,8 @@ const navigation: Array<{label:Page; icon: typeof Home}> = [
 export function App() {
   const [page,setPage]=useState<Page>('Inicio');
   const [boot,setBoot]=useState<Bootstrap|null>(null);
+  const [authMode,setAuthMode]=useState<AuthMode>('create');
+  const [pendingAccount,setPendingAccount]=useState<PendingAccount|null>(null);
   const [home,setHome]=useState<HomeDto>(emptyHome);
   const [items,setItems]=useState<MediaSummary[]>([]);
   const [scan,setScan]=useState<ScanProgress>(emptyScan);
@@ -28,12 +35,19 @@ export function App() {
   const [heroIndex,setHeroIndex]=useState(0);
   const [detail,setDetail]=useState<MediaDetail|null>(null);
   const [playerSource,setPlayerSource]=useState<InternalPlayerSource|null>(null);
+  const [availableUpdate,setAvailableUpdate]=useState<PendingUpdate|null>(null);
+  const [updateMessage,setUpdateMessage]=useState<string|null>(null);
+  const [updating,setUpdating]=useState(false);
+  const [metadataLoading,setMetadataLoading]=useState(false);
   const [error,setError]=useState<string|null>(null);
 
   const refresh = useCallback(async()=>{
     try {
       const data=await invoke<Bootstrap>('bootstrap');
       setBoot(data);setHome(data.home);setScan(data.scan);
+      if(!data.activeAccount){
+        setItems([]);setHome(emptyHome);setAuthMode(data.accounts.length?'login':'create');setError(null);return;
+      }
       const catalog=await invoke<MediaSummary[]>('catalog',{query:{search:null,kind:null,filter:null,sort:'added_desc',limit:1000,offset:0}});
       setItems(catalog);setError(null);
     } catch (cause) { setError(String(cause)); }
@@ -58,9 +72,19 @@ export function App() {
   const chooseFolder=async()=>{const selected=await open({directory:true,multiple:false,title:'Elegir carpeta de películas y series'});if(typeof selected==='string'){try{await invoke('replace_library_root',{path:selected});await refresh();}catch(cause){setError(String(cause));}}};
   const openDetail=async(id:string)=>{try{const data=await invoke<MediaDetail|null>('media_detail',{id});setDetail(data);}catch(cause){setError(String(cause));}};
   const setFlag=async(item:MediaSummary,flag:'favorite'|'watchlist')=>{const value=flag==='favorite'?!item.favorite:!item.inWatchlist;await invoke('set_media_flag',{mediaId:item.id,flag,value});await refresh();if(detail?.id===item.id)setDetail(await invoke('media_detail',{id:item.id}));};
+  const saveMetadata=async(mediaId:string,metadata:MediaMetadataUpdate)=>{try{setError(null);await invoke('update_media_metadata',{mediaId,metadata});const next=await invoke<MediaDetail|null>('media_detail',{id:mediaId});setDetail(next);await refresh();}catch(cause){setError(String(cause));}};
+  const refreshMetadata=async(mediaId:string)=>{try{setMetadataLoading(true);setError(null);await invoke('refresh_media_metadata',{mediaId});const next=await invoke<MediaDetail|null>('media_detail',{id:mediaId});setDetail(next);await refresh();}catch(cause){setError(String(cause));}finally{setMetadataLoading(false);}};
+  const applyMetadataCandidate=async(mediaId:string,candidate:MediaMetadataCandidate)=>{try{setMetadataLoading(true);setError(null);await invoke('apply_metadata_candidate',{mediaId,candidate});const next=await invoke<MediaDetail|null>('media_detail',{id:mediaId});setDetail(next);await refresh();}catch(cause){setError(String(cause));}finally{setMetadataLoading(false);}};
   const playMedia=async(id:string)=>{try{setError(null);const [detail,path]=await Promise.all([invoke<MediaDetail|null>('media_detail',{id}),invoke<string|null>('technical_path',{mediaId:id})]);if(!detail||!path){setError('No se encontró el archivo para reproducir.');return;}const durationMs=detail.runtimeMs||detail.technical.durationMs||0;const resumeMs=detail.completed?0:Math.round(durationMs*(detail.progressPercent/100));setDetail(null);setPlayerSource({detail,path,url:assetUrl(path),resumeMs});}catch(cause){setError(`No se pudo abrir el reproductor interno: ${String(cause)}`);}};
   const openExternalMedia=async(id:string)=>{try{setError(null);await invoke('player_command',{command:{type:'play',media_id:id}});}catch(cause){setError(`No se pudo abrir reproductor externo: ${String(cause)}`);}};
+  const submitAccount=async(mode:AuthMode,name:string,password:string)=>{if(mode==='create'){setPendingAccount({name,password});return;}try{setError(null);await invoke('login_account',{name,password});setSearch('');setPage('Inicio');await refresh();}catch(cause){setError(String(cause));}};
+  const confirmCreateAccount=async()=>{if(!pendingAccount)return;try{setError(null);await invoke('create_account',pendingAccount);setPendingAccount(null);setSearch('');setPage('Inicio');await refresh();}catch(cause){setError(String(cause));setPendingAccount(null);}};
+  const logout=async()=>{try{await invoke('logout_account');setDetail(null);setPlayerSource(null);setSearch('');setPage('Inicio');await refresh();}catch(cause){setError(String(cause));}};
+  const checkForUpdates=async()=>{try{setUpdating(true);setAvailableUpdate(null);setUpdateMessage('Buscando actualizaciones en GitHub Releases...');const update=await check();if(update){setAvailableUpdate(update);setUpdateMessage(`Actualización disponible: versión ${update.version}`);}else{setUpdateMessage('CINE WANA ya está en la última versión publicada.');}}catch(cause){setUpdateMessage(`No se pudo buscar actualizaciones: ${String(cause)}`);}finally{setUpdating(false);}};
+  const installAvailableUpdate=async()=>{if(!availableUpdate)return;try{setUpdating(true);let downloaded=0;let contentLength=0;await availableUpdate.downloadAndInstall(event=>{if(event.event==='Started'){contentLength=event.data.contentLength||0;setUpdateMessage('Descargando actualización...');}else if(event.event==='Progress'){downloaded+=event.data.chunkLength;setUpdateMessage(contentLength?`Descargando ${Math.round(downloaded/contentLength*100)}%`:'Descargando actualización...');}else if(event.event==='Finished'){setUpdateMessage('Instalando actualización...');}});setUpdateMessage('Actualización instalada. En Windows la app se cerrará para terminar.');}catch(cause){setUpdateMessage(`No se pudo instalar la actualización: ${String(cause)}`);}finally{setUpdating(false);}};
   const hero=home.heroes[heroIndex];
+
+  if(boot&&!boot.activeAccount)return <AuthScreen boot={boot} mode={authMode} setMode={setAuthMode} pendingAccount={pendingAccount} onSubmit={submitAccount} onConfirmCreate={confirmCreateAccount} onCancelCreate={()=>setPendingAccount(null)} error={error} clearError={()=>setError(null)}/>;
 
   return <div className="app-shell">
     <aside className="sidebar">
@@ -71,20 +95,62 @@ export function App() {
     <main>
       <header className="topbar">
         <div className="search"><Search size={18}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar títulos, años y series…"/>{search&&<button onClick={()=>setSearch('')}><X size={16}/></button>}</div>
+        {boot?.activeAccount&&<div className="account-pill"><UserRound size={16}/><span>{boot.activeAccount.name}</span><button onClick={logout} title="Cerrar sesión"><LogOut size={15}/></button></div>}
         <button className={`scan-button ${scan.running?'working':''}`} onClick={rescan}>{scan.running?<><X size={17}/>Cancelar escaneo</>:<><RefreshCw size={17}/>Reescanear biblioteca</>}</button>
       </header>
 
       {scan.running&&<div className="scan-strip"><LoaderCircle className="spin" size={16}/><div><b>{scan.message||'Escaneando biblioteca'}</b><small>{scan.currentFile||`${scan.found} archivos encontrados`}</small></div><div className="scan-meter"><i style={{width:`${scan.percent}%`}}/></div><span>{Math.round(scan.percent)}%</span></div>}
       {error&&<div className="error-banner"><CircleAlert size={18}/><span>{error}</span><button onClick={()=>setError(null)}><X size={16}/></button></div>}
 
-      {!boot?<Loading/>:page==='Configuración'?<SettingsPage boot={boot} scan={scan} onRescan={rescan} onChoose={chooseFolder}/>:page==='Series'?<SeriesPage series={home.series} search={search}/>:page==='Inicio'&&!search?<HomePage home={home} hero={hero} heroIndex={heroIndex} setHeroIndex={setHeroIndex} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>:<CatalogPage title={page} items={visible} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>}
+      {!boot?<Loading/>:page==='Configuración'?<SettingsPage boot={boot} scan={scan} updating={updating} updateMessage={updateMessage} updateVersion={availableUpdate?.version} onRescan={rescan} onChoose={chooseFolder} onLogout={logout} onCheckUpdates={checkForUpdates} onInstallUpdate={installAvailableUpdate}/>:page==='Series'?<SeriesPage series={home.series} search={search}/>:page==='Inicio'&&!search?<HomePage home={home} hero={hero} heroIndex={heroIndex} setHeroIndex={setHeroIndex} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>:<CatalogPage title={page} items={visible} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>}
     </main>
-    {detail&&<DetailModal detail={detail} close={()=>setDetail(null)} setFlag={setFlag} playMedia={playMedia} openExternalMedia={openExternalMedia}/>}
+    {detail&&<DetailModal detail={detail} close={()=>setDetail(null)} setFlag={setFlag} playMedia={playMedia} openExternalMedia={openExternalMedia} onSaveMetadata={saveMetadata} onRefreshMetadata={refreshMetadata} onApplyCandidate={applyMetadataCandidate} openDetail={openDetail} metadataLoading={metadataLoading}/>}
     {playerSource&&<InternalPlayer source={playerSource} onClose={()=>setPlayerSource(null)} onOpenExternal={openExternalMedia} onProgressSaved={()=>void refresh()}/>}
   </div>;
 }
 
 function Loading(){return <div className="loading-screen"><LoaderCircle className="spin"/><b>Preparando tu biblioteca</b><span>La primera lectura puede tardar unos segundos.</span></div>}
+
+function AuthScreen({boot,mode,setMode,pendingAccount,onSubmit,onConfirmCreate,onCancelCreate,error,clearError}:{boot:Bootstrap;mode:AuthMode;setMode:(mode:AuthMode)=>void;pendingAccount:PendingAccount|null;onSubmit:(mode:AuthMode,name:string,password:string)=>Promise<void>;onConfirmCreate:()=>Promise<void>;onCancelCreate:()=>void;error:string|null;clearError:()=>void}){
+  const [name,setName]=useState('');
+  const [password,setPassword]=useState('');
+  const hasAccounts=boot.accounts.length>0;
+  const passwordOk=/^[A-Za-z0-9]{4,10}$/.test(password);
+  const canSubmit=name.trim().length>0&&passwordOk;
+  const activeMode=mode==='login'&&hasAccounts?'login':'create';
+  return <main className="auth-shell">
+    <section className="auth-panel">
+      <div className="auth-brand"><span>CINE</span><strong>WANA</strong></div>
+      <div className="auth-heading"><span className="eyebrow">CUENTA LOCAL</span><h1>{activeMode==='create'?'Crear cuenta':'Entrar'}</h1><p>Nombre y contraseña local. Sin email.</p></div>
+      {hasAccounts&&<div className="auth-tabs"><button className={activeMode==='login'?'active':''} onClick={()=>setMode('login')}>Entrar</button><button className={activeMode==='create'?'active':''} onClick={()=>setMode('create')}>Crear otra</button></div>}
+      {hasAccounts&&activeMode==='login'&&<div className="known-accounts">{boot.accounts.map(account=><button key={account.id} onClick={()=>setName(account.name)}><UserRound size={13}/>{account.name}</button>)}</div>}
+      {error&&<div className="error-banner auth-error"><CircleAlert size={18}/><span>{error}</span><button onClick={clearError}><X size={16}/></button></div>}
+      <form onSubmit={event=>{event.preventDefault();if(canSubmit)void onSubmit(activeMode,name.trim(),password);}}>
+        <label><span>Nombre</span><div><UserRound size={17}/><input value={name} onChange={event=>setName(event.target.value)} autoFocus maxLength={40} autoComplete="username"/></div></label>
+        <label><span>Contraseña</span><div><KeyRound size={17}/><input value={password} onChange={event=>setPassword(event.target.value)} type="password" minLength={4} maxLength={10} pattern="[A-Za-z0-9]{4,10}" autoComplete={activeMode==='create'?'new-password':'current-password'}/></div><small>4 a 10 letras o números</small></label>
+        <button className="primary auth-submit" disabled={!canSubmit}>{activeMode==='create'?'Crear cuenta':'Entrar'}</button>
+      </form>
+    </section>
+    {pendingAccount&&<ConfirmAccountModal account={pendingAccount} onConfirm={onConfirmCreate} onCancel={onCancelCreate}/>}
+  </main>
+}
+
+function ConfirmAccountModal({account,onConfirm,onCancel}:{account:PendingAccount;onConfirm:()=>Promise<void>;onCancel:()=>void}){
+  return <div className="auth-confirm-backdrop" role="dialog" aria-modal="true">
+    <section className="auth-confirm">
+      <span className="eyebrow">CONFIRMAR CUENTA</span>
+      <h2>¿Estás seguro que querés crear tu cuenta?</h2>
+      <dl>
+        <div><dt>Nombre</dt><dd>{account.name}</dd></div>
+        <div><dt>Contraseña</dt><dd>{account.password}</dd></div>
+      </dl>
+      <div className="auth-confirm-actions">
+        <button onClick={onCancel}>No, volver</button>
+        <button className="primary" onClick={()=>void onConfirm()}>Sí, crear cuenta</button>
+      </div>
+    </section>
+  </div>
+}
 
 function HomePage({home,hero,heroIndex,setHeroIndex,openDetail,setFlag,playMedia}:{home:HomeDto;hero?:MediaSummary;heroIndex:number;setHeroIndex:(n:number)=>void;openDetail:(id:string)=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void}){
   return <div className="content home-page">
@@ -108,12 +174,54 @@ function SeriesRow({title,series}:{title:string;series:SeriesSummary[]}){if(!ser
 function CatalogPage({title,items,openDetail,setFlag,playMedia}:{title:string;items:MediaSummary[];openDetail:(id:string)=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void}){return <div className="content catalog-page"><div className="page-heading"><div><span className="eyebrow">TU BIBLIOTECA</span><h1>{title}</h1></div><span>{items.length} resultados</span></div>{items.length?<div className="card-grid">{items.map(i=><MediaCard key={i.id} item={i} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>)}</div>:<div className="empty-results"><Film/><h2>No hay contenido en esta sección</h2><p>Los elementos aparecerán después del próximo escaneo.</p></div>}</div>}
 function SeriesPage({series,search}:{series:SeriesSummary[];search:string}){const q=search.toLocaleLowerCase();const list=series.filter(s=>s.title.toLocaleLowerCase().includes(q));return <div className="content catalog-page"><div className="page-heading"><div><span className="eyebrow">EPISODIOS AGRUPADOS</span><h1>Series</h1></div><span>{list.length} series</span></div><div className="card-grid">{list.map(s=><article className="media-card" key={s.title}><Poster title={s.title} label="SERIE" src={s.artworkUrl}/><h3>{s.title}</h3><p>{s.seasons} temporadas · {s.episodes} episodios</p></article>)}</div></div>}
 
-function MediaCard({item,openDetail,setFlag,playMedia}:{item:MediaSummary;openDetail:(id:string)=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void}){return <article className="media-card"><div className="poster-button"><button className="poster-detail" onClick={()=>openDetail(item.id)} aria-label={`Ver detalles de ${displayTitle(item)}`}><Poster title={displayTitle(item)} label={item.kind==='episode'?'SERIE':quality(item)} src={item.artworkUrl}/></button>{item.progressPercent>0&&<span className="card-progress"><i style={{width:`${item.progressPercent}%`}}/></span>}<button className="hover-play" onClick={()=>void playMedia(item.id)} title="Reproducir"><Play fill="currentColor"/></button></div><div className="card-copy"><div><h3>{displayTitle(item)}</h3><p>{item.year||'Sin año'}{item.kind==='episode'?` · T${item.seasonNumber} E${item.episodeNumber}`:''}</p></div><div className="quick-actions"><button className={item.favorite?'selected':''} title="Favorito" onClick={()=>void setFlag(item,'favorite')}><Heart size={15} fill={item.favorite?'currentColor':'none'}/></button><button className={item.inWatchlist?'selected':''} title="Mi lista" onClick={()=>void setFlag(item,'watchlist')}><Bookmark size={15} fill={item.inWatchlist?'currentColor':'none'}/></button></div></div></article>}
+function MediaCard({item,openDetail,setFlag,playMedia}:{item:MediaSummary;openDetail:(id:string)=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void}){return <article className="media-card"><div className="poster-button"><button className="poster-detail" onClick={()=>openDetail(item.id)} aria-label={`Ver detalles de ${displayTitle(item)}`}><Poster title={displayTitle(item)} label={item.kind==='episode'?'SERIE':quality(item)} src={item.artworkUrl}/></button>{item.progressPercent>0&&<span className="card-progress"><i style={{width:`${item.progressPercent}%`}}/></span>}<button className="hover-play" onClick={()=>void playMedia(item.id)} title="Reproducir"><Play fill="currentColor"/></button></div><div className="card-copy"><div><button className="title-link" onClick={()=>openDetail(item.id)}>{displayTitle(item)}</button><p>{item.year||'Sin año'}{item.kind==='episode'?` · T${item.seasonNumber} E${item.episodeNumber}`:''}</p></div><div className="quick-actions"><button className={item.favorite?'selected':''} title="Favorito" onClick={()=>void setFlag(item,'favorite')}><Heart size={15} fill={item.favorite?'currentColor':'none'}/></button><button className={item.inWatchlist?'selected':''} title="Mi lista" onClick={()=>void setFlag(item,'watchlist')}><Bookmark size={15} fill={item.inWatchlist?'currentColor':'none'}/></button></div></div></article>}
 function Poster({title,label,src}:{title:string;label:string;src?:string}){return <div className={`poster ${src?'has-image':''}`} style={{'--poster-hue':hueFor(title)} as React.CSSProperties}>{src&&<img src={assetUrl(src)} alt=""/>}<span className="poster-label">{label}</span>{!src&&<b>{initials(title)}</b>}<small>{title}</small></div>}
 
-function SettingsPage({boot,scan,onRescan,onChoose}:{boot:Bootstrap;scan:ScanProgress;onRescan:()=>void;onChoose:()=>void}){const root=boot.roots.find(r=>r.enabled)||boot.roots[0];return <div className="content settings-page"><div className="page-heading"><div><span className="eyebrow">CINE WANA</span><h1>Configuración</h1></div></div><section className="settings-card"><div className="settings-icon"><FolderCog/></div><div className="settings-main"><div className="settings-title"><div><h2>Biblioteca</h2><p>Carpeta activa y lectura recursiva</p></div><span className={`root-status ${root?.status}`}>{root?.status==='online'?'Conectada':root?.status==='scanning'?'Escaneando':'Desconectada'}</span></div><div className="path-box"><code>{root?.localPath||'Sin carpeta configurada'}</code><button onClick={onChoose}>Cambiar carpeta</button></div><div className="settings-stats"><div><small>Último escaneo</small><b>{root?.lastScanAt?new Date(root.lastScanAt).toLocaleString('es-AR'):'Todavía no finalizó'}</b></div><div><small>Subcarpetas</small><b>{root?.recursive?'Incluidas':'Excluidas'}</b></div><div><small>Archivos desconectados</small><b>{root?.disconnectedCount||0}</b></div></div><button className="primary settings-rescan" onClick={onRescan}>{scan.running?<><X/>Cancelar escaneo</>:<><RefreshCw/>Reescanear biblioteca</>}</button></div></section><section className="settings-card compact"><div className="settings-icon"><Film/></div><div className="settings-main"><div className="settings-title"><div><h2>Componentes multimedia</h2><p>Diagnóstico del entorno de desarrollo</p></div></div><div className="diagnostic-row"><span>FFmpeg / ffprobe</span><b className={boot.ffprobeAvailable?'ok':'pending'}>{boot.ffprobeAvailable?<><Check/>Disponible</>:<><CircleAlert/>Pendiente</>}</b></div><div className="diagnostic-row"><span>Reproductor interno + externo</span><b className={boot.playerAvailable?'ok':'pending'}>{boot.playerAvailable?<><Check/>Disponible</>:<><CircleAlert/>No encontrado</>}</b></div></div></section></div>}
+function SettingsPage({boot,scan,updating,updateMessage,updateVersion,onRescan,onChoose,onLogout,onCheckUpdates,onInstallUpdate}:{boot:Bootstrap;scan:ScanProgress;updating:boolean;updateMessage:string|null;updateVersion?:string;onRescan:()=>void;onChoose:()=>void;onLogout:()=>void;onCheckUpdates:()=>void;onInstallUpdate:()=>void}){const root=boot.roots.find(r=>r.enabled)||boot.roots[0];return <div className="content settings-page"><div className="page-heading"><div><span className="eyebrow">CINE WANA</span><h1>Configuración</h1></div></div><section className="settings-card compact"><div className="settings-icon"><UserRound/></div><div className="settings-main"><div className="settings-title"><div><h2>Cuenta local</h2><p>Progreso, historial y listas de esta sesión</p></div><span className="root-status online">{boot.activeAccount?.name}</span></div><div className="diagnostic-row"><span>Cuentas creadas</span><b>{boot.accounts.length}</b></div><button className="settings-rescan account-logout" onClick={onLogout}><LogOut/>Cerrar sesión</button></div></section><section className="settings-card compact"><div className="settings-icon"><RefreshCw/></div><div className="settings-main"><div className="settings-title"><div><h2>Actualizaciones</h2><p>GitHub Releases firmado para Windows x64</p></div><span className="root-status">{updateVersion?`v${updateVersion}`:'Manual'}</span></div>{updateMessage&&<div className="update-note">{updateMessage}</div>}<div className="update-actions"><button className="settings-rescan" disabled={updating} onClick={onCheckUpdates}>{updating?<><LoaderCircle className="spin"/>Buscando</>:<><RefreshCw/>Buscar actualizaciones</>}</button>{updateVersion&&<button className="primary settings-rescan" disabled={updating} onClick={onInstallUpdate}><Check/>Instalar versión</button>}</div></div></section><section className="settings-card"><div className="settings-icon"><FolderCog/></div><div className="settings-main"><div className="settings-title"><div><h2>Biblioteca</h2><p>Carpeta activa y lectura recursiva</p></div><span className={`root-status ${root?.status}`}>{root?.status==='online'?'Conectada':root?.status==='scanning'?'Escaneando':'Desconectada'}</span></div><div className="path-box"><code>{root?.localPath||'Sin carpeta configurada'}</code><button onClick={onChoose}>Cambiar carpeta</button></div><div className="settings-stats"><div><small>Último escaneo</small><b>{root?.lastScanAt?new Date(root.lastScanAt).toLocaleString('es-AR'):'Todavía no finalizó'}</b></div><div><small>Subcarpetas</small><b>{root?.recursive?'Incluidas':'Excluidas'}</b></div><div><small>Archivos desconectados</small><b>{root?.disconnectedCount||0}</b></div></div><button className="primary settings-rescan" onClick={onRescan}>{scan.running?<><X/>Cancelar escaneo</>:<><RefreshCw/>Reescanear biblioteca</>}</button></div></section><section className="settings-card compact"><div className="settings-icon"><Film/></div><div className="settings-main"><div className="settings-title"><div><h2>Componentes multimedia</h2><p>Diagnóstico del entorno de desarrollo</p></div></div><div className="diagnostic-row"><span>FFmpeg / ffprobe</span><b className={boot.ffprobeAvailable?'ok':'pending'}>{boot.ffprobeAvailable?<><Check/>Disponible</>:<><CircleAlert/>Pendiente</>}</b></div><div className="diagnostic-row"><span>Reproductor interno + externo</span><b className={boot.playerAvailable?'ok':'pending'}>{boot.playerAvailable?<><Check/>Disponible</>:<><CircleAlert/>No encontrado</>}</b></div></div></section></div>}
 
-function DetailModal({detail,close,setFlag,playMedia,openExternalMedia}:{detail:MediaDetail;close:()=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void;openExternalMedia:(id:string)=>void}){return <div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)close();}}><section className="detail-modal" style={{'--detail-backdrop':detail.backdropUrl?`url("${assetUrl(detail.backdropUrl)}")`:'none'} as React.CSSProperties}><button className="modal-close" onClick={close}><X/></button><div className="detail-art"><Poster title={displayTitle(detail)} label={detail.kind==='episode'?'SERIE':quality(detail)} src={detail.artworkUrl}/></div><div className="detail-copy"><span className="eyebrow">{detail.kind==='episode'?`TEMPORADA ${detail.seasonNumber} · EPISODIO ${detail.episodeNumber}`:'PELÍCULA'}</span><h1>{displayTitle(detail)}</h1><div className="detail-meta"><span>{detail.year||'Sin año'}</span><span>{quality(detail)}</span>{detail.technical.hdrType&&<span>{detail.technical.hdrType}</span>}{detail.runtimeMs&&<span>{formatDuration(detail.runtimeMs)}</span>}</div><p className="overview">{detail.overview||'Vista previa generada directamente desde el archivo local. Podés reproducir el contenido completo con sus pistas disponibles.'}</p><div className="detail-actions"><button className="primary" onClick={()=>void playMedia(detail.id)}><Play fill="currentColor"/>Reproducir en CINE WANA</button><button onClick={()=>void openExternalMedia(detail.id)}>Abrir externo</button><button className={detail.inWatchlist?'selected':''} onClick={()=>void setFlag(detail,'watchlist')}><Bookmark/>Mi lista</button><button className={detail.favorite?'selected':''} onClick={()=>void setFlag(detail,'favorite')}><Heart/>Favorito</button></div><div className="technical"><h3>Información técnica</h3><dl><div><dt>Archivo</dt><dd>{detail.fileName}</dd></div><div><dt>Contenedor</dt><dd>{detail.technical.container||'Pendiente de ffprobe'}</dd></div><div><dt>Video</dt><dd>{detail.technical.videoCodec||'Sin analizar'}</dd></div><div><dt>Audio</dt><dd>{detail.technical.audioCodec||'Sin analizar'}</dd></div><div><dt>Subtítulos externos</dt><dd>{detail.tracks.filter(t=>t.external).length}</dd></div></dl></div></div></section></div>}
+const genrePresets=['Acción','Aventura','Animación','Ciencia ficción','Comedia','Documental','Drama','Romance','Suspenso','Terror'];
+const parseList=(value:string)=>Array.from(new Set(value.split(',').map(part=>part.trim()).filter(Boolean)));
+const addTag=(value:string,tag:string)=>parseList(`${value},${tag}`).join(', ');
+const detailToForm=(detail:MediaDetail)=>({title:displayTitle(detail),year:detail.year?.toString()||'',overview:detail.overview||'',genres:detail.genres.join(', '),cast:detail.cast.join(', '),posterPath:'',backdropPath:''});
+const metadataLabel=(status:string)=>status==='imported'?'Wikipedia importado':status==='ambiguous'?'Elegir coincidencia':'Información pendiente';
+
+function DetailModal({detail,close,setFlag,playMedia,openExternalMedia,onSaveMetadata,onRefreshMetadata,onApplyCandidate,openDetail,metadataLoading}:{detail:MediaDetail;close:()=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void;openExternalMedia:(id:string)=>void;onSaveMetadata:(id:string,metadata:MediaMetadataUpdate)=>Promise<void>;onRefreshMetadata:(id:string)=>Promise<void>;onApplyCandidate:(id:string,candidate:MediaMetadataCandidate)=>Promise<void>;openDetail:(id:string)=>void;metadataLoading:boolean}){
+  const [editing,setEditing]=useState(false);
+  const [form,setForm]=useState(()=>detailToForm(detail));
+  useEffect(()=>{setEditing(false);setForm(detailToForm(detail));},[detail.id]);
+  const chooseImage=async(field:'posterPath'|'backdropPath')=>{
+    const selected=await open({multiple:false,directory:false,title:field==='posterPath'?'Elegir portada':'Elegir fondo',filters:[{name:'Imagen',extensions:['png','jpg','jpeg','webp']}]});
+    if(typeof selected==='string')setForm(prev=>({...prev,[field]:selected}));
+  };
+  const save=async()=>{await onSaveMetadata(detail.id,{title:form.title,year:form.year.trim()?Number(form.year):null,overview:form.overview.trim()||null,genres:parseList(form.genres),cast:parseList(form.cast),posterPath:form.posterPath||null,backdropPath:form.backdropPath||null});setEditing(false);};
+  return <div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)close();}}>
+    <section className="detail-modal detail-modal-expanded" style={{'--detail-backdrop':detail.backdropUrl?`url("${assetUrl(detail.backdropUrl)}")`:'none'} as React.CSSProperties}>
+      <button className="modal-close" onClick={close}><X/></button>
+      <div className="detail-art"><Poster title={displayTitle(detail)} label={detail.kind==='episode'?'SERIE':quality(detail)} src={detail.artworkUrl}/>{editing&&<div className="art-buttons"><button onClick={()=>void chooseImage('posterPath')}><ImagePlus/>Portada</button><button onClick={()=>void chooseImage('backdropPath')}><ImagePlus/>Fondo</button></div>}</div>
+      <div className="detail-copy">
+        <div className="detail-headline"><span className="eyebrow">{detail.kind==='episode'?`TEMPORADA ${detail.seasonNumber} · EPISODIO ${detail.episodeNumber}`:'PELÍCULA'}</span><div><button disabled={metadataLoading} onClick={()=>void onRefreshMetadata(detail.id)}>{metadataLoading?<LoaderCircle className="spin"/>:<RefreshCw/>}Volver a buscar información</button><button onClick={()=>setEditing(value=>!value)}><Pencil/>Editar datos</button></div></div>
+        {editing?<div className="metadata-editor">
+          <label><span>Título</span><input value={form.title} onChange={e=>setForm({...form,title:e.target.value})}/></label>
+          <label><span>Año</span><input value={form.year} onChange={e=>setForm({...form,year:e.target.value.replace(/\D/g,'').slice(0,4)})}/></label>
+          <label className="wide"><span>Descripción</span><textarea value={form.overview} onChange={e=>setForm({...form,overview:e.target.value})}/></label>
+          <label className="wide"><span>Géneros</span><input value={form.genres} onChange={e=>setForm({...form,genres:e.target.value})}/><small>{genrePresets.map(genre=><button type="button" key={genre} onClick={()=>setForm(prev=>({...prev,genres:addTag(prev.genres,genre)}))}>{genre}</button>)}</small></label>
+          <label className="wide"><span>Actores</span><input value={form.cast} onChange={e=>setForm({...form,cast:e.target.value})}/></label>
+          <div className="editor-actions"><button onClick={()=>{setEditing(false);setForm(detailToForm(detail));}}>Cancelar</button><button className="primary" onClick={()=>void save()}><Save/>Guardar</button></div>
+        </div>:<>
+          <h1>{displayTitle(detail)}</h1>
+          <div className="detail-meta"><span>{detail.year||'Sin año'}</span><span>{quality(detail)}</span>{detail.technical.hdrType&&<span>{detail.technical.hdrType}</span>}{detail.runtimeMs&&<span>{formatDuration(detail.runtimeMs)}</span>}{detail.manualMetadata&&<span>EDITADO</span>}<span>{metadataLabel(detail.metadataStatus)}</span></div>
+          <div className="genre-pills">{detail.genres.length?detail.genres.map(genre=><span key={genre}><Tags size={12}/>{genre}</span>):<span><Tags size={12}/>Sin género</span>}</div>
+          <p className="overview">{detail.overview||'Todavía no hay descripción. Podés editar esta ficha y agregar la sinopsis, género, actores y portada.'}</p>
+          <div className="cast-block"><h3><Users size={15}/> Reparto</h3>{detail.cast.length?<p>{detail.cast.join(', ')}</p>:<p>Sin actores cargados.</p>}</div>
+          <div className="metadata-source"><h3>Información externa</h3>{detail.metadataSourceUrl?<p>Fuente: <a href={detail.metadataSourceUrl} target="_blank" rel="noreferrer">Wikipedia</a>{detail.metadataImportedAt?` · ${new Date(detail.metadataImportedAt).toLocaleDateString('es-AR')}`:''}</p>:<p>{detail.metadataStatus==='ambiguous'?'Wikipedia encontró varias posibilidades. Elegí la correcta abajo.':'Todavía no hay una fuente externa guardada.'}</p>}{detail.metadataCandidates.length>0&&<div className="metadata-candidates">{detail.metadataCandidates.map(candidate=><button key={candidate.id} disabled={metadataLoading} onClick={()=>void onApplyCandidate(detail.id,candidate)}><b>{candidate.title}</b><span>{candidate.year||'Sin año'} · {candidate.language.toUpperCase()}</span>{candidate.description&&<small>{candidate.description}</small>}</button>)}</div>}</div>
+        </>}
+        <div className="detail-actions"><button className="primary" onClick={()=>void playMedia(detail.id)}><Play fill="currentColor"/>Reproducir en CINE WANA</button><button onClick={()=>void openExternalMedia(detail.id)}>Abrir externo</button><button className={detail.inWatchlist?'selected':''} onClick={()=>void setFlag(detail,'watchlist')}><Bookmark/>Mi lista</button><button className={detail.favorite?'selected':''} onClick={()=>void setFlag(detail,'favorite')}><Heart/>Favorito</button></div>
+        <div className="technical"><h3>Información técnica</h3><dl><div><dt>Archivo</dt><dd>{detail.fileName}</dd></div><div><dt>Contenedor</dt><dd>{detail.technical.container||'Pendiente de ffprobe'}</dd></div><div><dt>Video</dt><dd>{detail.technical.videoCodec||'Sin analizar'}</dd></div><div><dt>Audio</dt><dd>{detail.technical.audioCodec||'Sin analizar'}</dd></div><div><dt>Subtítulos externos</dt><dd>{detail.tracks.filter(t=>t.external).length}</dd></div></dl></div>
+        {detail.recommendations.length>0&&<section className="recommendations"><h3>Más para ver</h3><div>{detail.recommendations.map(item=><button key={item.id} onClick={()=>openDetail(item.id)}><Poster title={displayTitle(item)} label={item.kind==='episode'?'SERIE':quality(item)} src={item.artworkUrl}/><span>{displayTitle(item)}</span></button>)}</div></section>}
+      </div>
+    </section>
+  </div>
+}
 
 const displayTitle=(item:MediaSummary)=>item.kind==='episode'?(item.seriesTitle||item.title):item.title;
 const initials=(value:string)=>value.split(/\s+/).filter(Boolean).slice(0,3).map(v=>v[0]).join('').toUpperCase();
