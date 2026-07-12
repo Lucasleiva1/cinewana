@@ -79,6 +79,17 @@
 .cw-player-error { position:absolute; z-index:8; top:105px; left:50%; transform:translateX(-50%); width:min(680px,calc(100vw - 48px)); border:1px solid #b1122675; background:#240d12e8; color:#ffd4da; border-radius:9px; padding:12px 14px; display:flex; align-items:center; gap:10px; font-size:12px; box-shadow:0 20px 60px #0009; }
 .cw-player-error span { flex:1; }
 .cw-player-error button { border:0; background:transparent; color:inherit; cursor:pointer; display:grid; place-items:center; }
+.cw-next-up { position:absolute; z-index:9; left:34px; bottom:116px; width:min(520px,calc(100vw - 68px)); min-height:96px; border:1px solid #ffffff1f; background:#080808e8; border-radius:12px; padding:12px; display:grid; grid-template-columns:58px 1fr auto; align-items:center; gap:13px; box-shadow:0 24px 70px #000c; backdrop-filter:blur(20px); }
+.cw-next-poster { width:58px; aspect-ratio:2/3; border-radius:7px; overflow:hidden; border:1px solid #ffffff18; background:linear-gradient(145deg,#351018,#121212); display:grid; place-items:center; color:#ffffff5e; font-family:Oswald,sans-serif; font-size:21px; font-weight:700; }
+.cw-next-poster img { width:100%; height:100%; object-fit:cover; display:block; }
+.cw-next-copy { min-width:0; display:flex; flex-direction:column; gap:4px; }
+.cw-next-copy small { color:#c8a46a; font-size:9px; text-transform:uppercase; letter-spacing:1.2px; font-weight:800; }
+.cw-next-copy b { color:#fff; font-size:15px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.cw-next-copy span { color:#bdb7b0; font-size:11px; }
+.cw-next-meter { height:4px; margin-top:5px; background:#ffffff1b; border-radius:999px; overflow:hidden; }
+.cw-next-meter i { display:block; height:100%; background:linear-gradient(90deg,#b11226,#ff3853); border-radius:999px; box-shadow:0 0 18px #b1122670; }
+.cw-next-up button { height:34px; border:1px solid #ffffff1a; background:#ffffff0b; color:#eee; border-radius:7px; padding:0 12px; cursor:pointer; font-size:11px; font-weight:800; }
+.cw-next-up button:hover { border-color:#c8a46a66; color:#fff; }
 .cw-player-controls { position:absolute; z-index:6; left:0; right:0; bottom:0; padding:90px 34px 28px; background:linear-gradient(transparent,#0008 38%,#000f); transition:.22s opacity; }
 .cw-progress-hit { padding:16px 0; cursor:pointer; }
 .cw-progress-track { height:5px; background:#ffffff28; border-radius:999px; overflow:visible; position:relative; transition:.16s height; }
@@ -111,7 +122,7 @@
 .cw-slider span b { color:#777; font-variant-numeric:tabular-nums; }
 .cw-slider input { width:100%; accent-color:#b11226; }
 .cw-reset-image { margin:6px 0 0; border-color:#ffffff18; color:#ddd; background:#ffffff0a; }
-@media(max-width:900px){.cw-controls-row{align-items:flex-start;flex-direction:column}.cw-controls-right{width:100%;justify-content:flex-end}.cw-volume{width:80px}.cw-player-top{padding-left:22px;padding-right:22px}.cw-player-controls{padding-left:22px;padding-right:22px}.cw-image-panel{right:22px}}
+@media(max-width:900px){.cw-controls-row{align-items:flex-start;flex-direction:column}.cw-controls-right{width:100%;justify-content:flex-end}.cw-volume{width:80px}.cw-player-top{padding-left:22px;padding-right:22px}.cw-player-controls{padding-left:22px;padding-right:22px}.cw-image-panel{right:22px}.cw-next-up{left:22px;right:22px;bottom:168px;width:auto;grid-template-columns:50px 1fr}.cw-next-up button{grid-column:2;justify-self:start}.cw-next-poster{width:50px}}
 
 /* Local account access and session controls. */
 .account-pill { margin-left:auto; height:38px; border:1px solid #ffffff12; background:#ffffff08; color:#ddd; border-radius:7px; display:flex; align-items:center; gap:8px; padding:0 8px 0 11px; font-size:12px; }
@@ -149,3 +160,16 @@
 .auth-confirm-actions,.update-actions { display:flex; align-items:center; flex-wrap:wrap; gap:9px; margin-top:18px; }
 .auth-confirm-actions button { height:39px; border:1px solid #ffffff18; background:#ffffff08; color:#ddd; border-radius:7px; padding:0 14px; cursor:pointer; font-size:11px; font-weight:700; }
 .update-note { margin-top:14px; border:1px solid #ffffff10; background:#0f0f0f; color:#cfc9c2; border-radius:7px; padding:11px 12px; font-size:11px; line-height:1.45; }
+
+/* Home carousel controls. */
+.carousel-shell { position:relative; margin:0 -12px; padding:0 12px; }
+.carousel-shell::before,.carousel-shell::after { content:""; position:absolute; z-index:2; top:0; bottom:12px; width:54px; pointer-events:none; opacity:.9; }
+.carousel-shell::before { left:0; background:linear-gradient(90deg,#111 0%,transparent 100%); }
+.carousel-shell::after { right:0; background:linear-gradient(270deg,#111 0%,transparent 100%); }
+.carousel-button { position:absolute; z-index:4; top:42%; transform:translateY(-50%); width:36px; height:56px; border:1px solid #ffffff18; background:#101010d9; color:#eee; border-radius:7px; display:grid; place-items:center; cursor:pointer; box-shadow:0 15px 40px #0009; opacity:.86; transition:.16s opacity,.16s transform,.16s border-color; }
+.carousel-button:hover { opacity:1; border-color:#c8a46a66; transform:translateY(-50%) scale(1.04); }
+.carousel-button-left { left:0; }
+.carousel-button-right { right:0; }
+.carousel-shell .card-row { scroll-behavior:smooth; cursor:grab; user-select:none; padding-left:12px; padding-right:12px; }
+.carousel-shell .card-row.dragging { cursor:grabbing; scroll-behavior:auto; }
+.carousel-shell .card-row.dragging .media-card { pointer-events:none; }

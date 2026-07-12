@@ -784,6 +784,38 @@ impl Database {
         }))
     }
 
+    pub fn next_movie(&self, account_id: Option<&str>, id: &str) -> Result<Option<MediaSummary>> {
+        let account_id = account_id.unwrap_or("");
+        let conn = self.connection.lock();
+        let source = conn
+            .query_row(MEDIA_SELECT_BY_ID, params![account_id, id], row_to_summary)
+            .optional()?;
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        if source.kind != MediaKind::Movie {
+            return Ok(None);
+        }
+        let source_key = sequel_key(&source.title);
+        let mut statement = conn.prepare(MEDIA_SELECT)?;
+        let mut candidates = statement
+            .query_map([account_id], row_to_summary)?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|item| item.id != source.id && item.kind == MediaKind::Movie)
+            .filter(|item| {
+                let key = sequel_key(&item.title);
+                key.base == source_key.base && key.sequence == source_key.sequence + 1
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|a, b| {
+            a.year
+                .cmp(&b.year)
+                .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+        });
+        Ok(candidates.into_iter().next())
+    }
+
     pub fn update_media_metadata(
         &self,
         media_id: &str,
@@ -1076,6 +1108,101 @@ fn recommendations_locked(
         })
     });
     Ok(scored.into_iter().take(12).map(|(_, item)| item).collect())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SequelKey {
+    base: String,
+    sequence: u32,
+}
+
+fn sequel_key(title: &str) -> SequelKey {
+    let tokens = title
+        .split(|value: char| !value.is_alphanumeric())
+        .map(normalize_sequence_token)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    let Some((index, sequence)) = tokens
+        .iter()
+        .enumerate()
+        .find_map(|(index, token)| sequence_number(token).map(|value| (index, value)))
+    else {
+        return SequelKey {
+            base: tokens.join(" "),
+            sequence: 1,
+        };
+    };
+    let mut base_tokens = tokens[..index].to_vec();
+    while base_tokens
+        .last()
+        .map(|token| sequence_prefix(token))
+        .unwrap_or(false)
+    {
+        base_tokens.pop();
+    }
+    if base_tokens.is_empty() {
+        base_tokens = tokens
+            .iter()
+            .enumerate()
+            .filter(|(token_index, _)| *token_index != index)
+            .map(|(_, token)| token.clone())
+            .collect();
+    }
+    SequelKey {
+        base: base_tokens.join(" "),
+        sequence,
+    }
+}
+
+fn normalize_sequence_token(value: &str) -> String {
+    value
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|character| match character {
+            'á' | 'à' | 'ä' | 'â' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            other => other,
+        })
+        .collect()
+}
+
+fn sequence_prefix(value: &str) -> bool {
+    matches!(
+        value,
+        "part"
+            | "parte"
+            | "chapter"
+            | "capitulo"
+            | "episode"
+            | "episodio"
+            | "numero"
+            | "nro"
+            | "no"
+    )
+}
+
+fn sequence_number(value: &str) -> Option<u32> {
+    if let Ok(number) = value.parse::<u32>() {
+        return (1..=30).contains(&number).then_some(number);
+    }
+    match value {
+        "one" | "uno" | "una" | "first" | "primera" | "primero" => Some(1),
+        "ii" | "two" | "dos" | "second" | "segunda" | "segundo" => Some(2),
+        "iii" | "three" | "tres" | "third" | "tercera" | "tercero" => Some(3),
+        "iv" | "four" | "cuatro" | "fourth" | "cuarta" | "cuarto" => Some(4),
+        "v" | "five" | "cinco" | "fifth" | "quinta" | "quinto" => Some(5),
+        "vi" | "six" | "seis" | "sixth" | "sexta" | "sexto" => Some(6),
+        "vii" | "seven" | "siete" | "seventh" | "septima" | "septimo" => Some(7),
+        "viii" | "eight" | "ocho" | "eighth" | "octava" | "octavo" => Some(8),
+        "ix" | "nine" | "nueve" | "ninth" | "novena" | "noveno" => Some(9),
+        "x" | "ten" | "diez" | "tenth" | "decima" | "decimo" => Some(10),
+        _ => None,
+    }
 }
 
 fn normalize_tags(values: Vec<String>, limit: usize) -> Vec<String> {
@@ -1434,6 +1561,73 @@ mod tests {
         assert!(db.create_account("Jael", "abcd1").is_ok());
         assert!(db.login_account("Jael", "abcd2").is_err());
         assert!(db.login_account("Jael", "abcd1").is_ok());
+    }
+
+    #[test]
+    fn finds_numbered_movie_sequels() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        for (path, fingerprint) in [
+            (r"D:\media\Alien.1979.mkv", "10:1"),
+            (r"D:\media\Alien.2.El.Regreso.1986.mkv", "11:1"),
+            (r"D:\media\Alien.3.1992.mkv", "12:1"),
+            (r"D:\media\Predator.1987.mkv", "13:1"),
+        ] {
+            db.upsert_file(&root, "scan-1", &discovered_file(path, fingerprint))
+                .unwrap();
+        }
+        db.finish_scan(&root, "scan-1", "completed", 4, 4, 0, 0)
+            .unwrap();
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        let catalog = db
+            .catalog(Some(&account.id), &CatalogQuery::default())
+            .unwrap();
+        let alien = catalog.iter().find(|item| item.title == "Alien").unwrap();
+        let alien_2 = db
+            .next_movie(Some(&account.id), &alien.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(alien_2.title, "Alien 2 El Regreso");
+        let alien_3 = db
+            .next_movie(Some(&account.id), &alien_2.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(alien_3.title, "Alien 3");
+    }
+
+    #[test]
+    fn ignores_series_episodes_for_movie_sequels() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        db.upsert_file(
+            &root,
+            "scan-1",
+            &discovered_file(r"D:\media\Alien.S01E01.mkv", "10:1"),
+        )
+        .unwrap();
+        db.upsert_file(
+            &root,
+            "scan-1",
+            &discovered_file(r"D:\media\Alien.2.1986.mkv", "11:1"),
+        )
+        .unwrap();
+        db.finish_scan(&root, "scan-1", "completed", 2, 2, 0, 0)
+            .unwrap();
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        let catalog = db
+            .catalog(Some(&account.id), &CatalogQuery::default())
+            .unwrap();
+        let episode = catalog
+            .iter()
+            .find(|item| item.kind == MediaKind::Episode)
+            .unwrap();
+        assert!(
+            db.next_movie(Some(&account.id), &episode.id)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

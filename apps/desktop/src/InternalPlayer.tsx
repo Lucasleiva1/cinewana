@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import {
   ExternalLink, Maximize, Pause, Play, RotateCcw, SkipBack, SkipForward,
   SlidersHorizontal, Sparkles, Volume2, VolumeX, X
 } from 'lucide-react';
-import type { MediaDetail } from './types';
+import type { MediaDetail, MediaSummary } from './types';
 
 export interface InternalPlayerSource {
   detail: MediaDetail;
@@ -39,15 +39,20 @@ const defaultImage: ImageSettings = {
   temperature: 0,
 };
 
+const NEXT_CREDITS_LEAD_SECONDS = 30;
+const NEXT_COUNTDOWN_SECONDS = 8;
+
 export function InternalPlayer({
   source,
   onClose,
   onOpenExternal,
+  onPlayNext,
   onProgressSaved,
 }: {
   source: InternalPlayerSource;
   onClose: () => void;
   onOpenExternal: (id: string) => Promise<void>;
+  onPlayNext: (id: string) => Promise<void>;
   onProgressSaved: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -55,6 +60,7 @@ export function InternalPlayer({
   const saveTimerRef = useRef<number | null>(null);
   const lastSavedAtRef = useRef(0);
   const restoredRef = useRef(false);
+  const nextStartedAtRef = useRef<number | null>(null);
   const [playing, setPlaying] = useState(true);
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(() => msToSeconds(source.detail.runtimeMs ?? source.detail.technical.durationMs ?? 0));
@@ -65,11 +71,16 @@ export function InternalPlayer({
   const [image, setImage] = useState<ImageSettings>(defaultImage);
   const [analysis, setAnalysis] = useState<ImageAnalysis | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const [nextMovie, setNextMovie] = useState<MediaSummary | null>(null);
+  const [nextPromptVisible, setNextPromptVisible] = useState(false);
+  const [nextDismissed, setNextDismissed] = useState(false);
+  const [nextCountdown, setNextCountdown] = useState(NEXT_COUNTDOWN_SECONDS);
   const [error, setError] = useState<string | null>(null);
 
   const title = displayTitle(source.detail);
   const resumeSeconds = msToSeconds(source.resumeMs);
   const canResume = resumeSeconds > 20 && !source.detail.completed;
+  const nextProgress = clamp((NEXT_COUNTDOWN_SECONDS - nextCountdown) / NEXT_COUNTDOWN_SECONDS, 0, 1);
 
   const imageFilter = useMemo(() => {
     const brightness = 1 + image.brightness / 100;
@@ -152,6 +163,31 @@ export function InternalPlayer({
     await saveProgress(true);
     await onOpenExternal(source.detail.id);
   }, [onOpenExternal, saveProgress, source.detail.id]);
+
+  const beginNextPrompt = useCallback(() => {
+    if (!nextMovie || nextDismissed || nextPromptVisible) return;
+    nextStartedAtRef.current = Date.now();
+    setNextCountdown(NEXT_COUNTDOWN_SECONDS);
+    setNextPromptVisible(true);
+    setControlsVisible(true);
+  }, [nextDismissed, nextMovie, nextPromptVisible]);
+
+  const cancelNextPrompt = useCallback(() => {
+    nextStartedAtRef.current = null;
+    setNextPromptVisible(false);
+    setNextDismissed(true);
+    setNextCountdown(NEXT_COUNTDOWN_SECONDS);
+    void saveProgress(true);
+  }, [saveProgress]);
+
+  const startNextMovie = useCallback(async () => {
+    if (!nextMovie) return;
+    nextStartedAtRef.current = null;
+    setNextPromptVisible(false);
+    setNextDismissed(true);
+    await saveProgress(true);
+    await onPlayNext(nextMovie.id);
+  }, [nextMovie, onPlayNext, saveProgress]);
 
   const analyzeImage = useCallback(async () => {
     const video = videoRef.current;
@@ -259,6 +295,58 @@ export function InternalPlayer({
     };
   }, []);
 
+  useEffect(() => {
+    restoredRef.current = false;
+    lastSavedAtRef.current = 0;
+    nextStartedAtRef.current = null;
+    setPlaying(true);
+    setCurrent(0);
+    setDuration(msToSeconds(source.detail.runtimeMs ?? source.detail.technical.durationMs ?? 0));
+    setError(null);
+    setNextMovie(null);
+    setNextPromptVisible(false);
+    setNextDismissed(false);
+    setNextCountdown(NEXT_COUNTDOWN_SECONDS);
+    setAnalysis(null);
+    setImage(defaultImage);
+  }, [source.detail.id, source.detail.runtimeMs, source.detail.technical.durationMs]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (source.detail.kind !== 'movie') {
+      setNextMovie(null);
+      return () => { cancelled = true; };
+    }
+    invoke<MediaSummary | null>('next_movie', { mediaId: source.detail.id })
+      .then(next => {
+        if (!cancelled) setNextMovie(next);
+      })
+      .catch(() => {
+        if (!cancelled) setNextMovie(null);
+      });
+    return () => { cancelled = true; };
+  }, [source.detail.id, source.detail.kind]);
+
+  useEffect(() => {
+    if (!nextMovie || nextDismissed || nextPromptVisible || duration <= 0) return;
+    if (duration < NEXT_CREDITS_LEAD_SECONDS + NEXT_COUNTDOWN_SECONDS + 8) return;
+    if (duration - current <= NEXT_CREDITS_LEAD_SECONDS) beginNextPrompt();
+  }, [beginNextPrompt, current, duration, nextDismissed, nextMovie, nextPromptVisible]);
+
+  useEffect(() => {
+    if (!nextPromptVisible || !nextMovie) return;
+    const timer = window.setInterval(() => {
+      const startedAt = nextStartedAtRef.current ?? Date.now();
+      const remaining = Math.max(0, NEXT_COUNTDOWN_SECONDS - (Date.now() - startedAt) / 1000);
+      setNextCountdown(remaining);
+      if (remaining <= 0) {
+        window.clearInterval(timer);
+        void startNextMovie();
+      }
+    }, 120);
+    return () => window.clearInterval(timer);
+  }, [nextMovie, nextPromptVisible, startNextMovie]);
+
   const progress = duration > 0 ? clamp(current / duration, 0, 1) : 0;
 
   return (
@@ -303,7 +391,11 @@ export function InternalPlayer({
         }}
         onEnded={() => {
           setPlaying(false);
-          void saveProgress(true);
+          if (nextMovie && !nextDismissed) {
+            beginNextPrompt();
+          } else {
+            void saveProgress(true);
+          }
         }}
         onError={() => setError('No se pudo reproducir dentro de CINE WANA. Probá Abrir externo para este archivo.')}
       />
@@ -316,6 +408,21 @@ export function InternalPlayer({
       </div>
 
       {error && <div className="cw-player-error"><span>{error}</span><button onClick={() => setError(null)}><X size={16}/></button></div>}
+
+      {nextMovie && nextPromptVisible && (
+        <aside className="cw-next-up" onClick={event => event.stopPropagation()}>
+          <div className="cw-next-poster">
+            {nextMovie.artworkUrl ? <img src={convertFileSrc(nextMovie.artworkUrl)} alt="" /> : <span>{initials(nextMovie.title)}</span>}
+          </div>
+          <div className="cw-next-copy">
+            <small>Siguiente parte</small>
+            <b>{nextMovie.title}</b>
+            <span>Empieza en {Math.ceil(nextCountdown)} s</span>
+            <div className="cw-next-meter"><i style={{ width: `${nextProgress * 100}%` }} /></div>
+          </div>
+          <button onClick={cancelNextPrompt}>Cancelar</button>
+        </aside>
+      )}
 
       <div className="cw-player-top">
         <div>
@@ -416,6 +523,10 @@ export function InternalPlayer({
 
 function displayTitle(item: MediaDetail) {
   return item.kind === 'episode' ? (item.seriesTitle || item.title) : item.title;
+}
+
+function initials(value: string) {
+  return value.split(/\s+/).filter(Boolean).slice(0, 3).map(part => part[0]).join('').toUpperCase();
 }
 
 function msToSeconds(ms: number) {

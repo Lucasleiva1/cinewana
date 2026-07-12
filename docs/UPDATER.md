@@ -48,18 +48,18 @@ Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
 Then create the upload-ready assets:
 
 ```powershell
-.\scripts\create-updater-release-assets.ps1 -Version 0.1.2 -Notes "Notas de la version"
+.\scripts\create-updater-release-assets.ps1 -Version 0.1.3 -Notes "Notas de la version"
 ```
 
 Create or update the GitHub Release:
 
 ```powershell
-gh release create app-v0.1.2 `
+gh release create app-v0.1.3 `
   -R Lucasleiva1/cinewana `
-  target\release\bundle\release-assets-0.1.2\CINE.WANA_0.1.2_x64-setup.exe `
-  target\release\bundle\release-assets-0.1.2\CINE.WANA_0.1.2_x64-setup.exe.sig `
-  target\release\bundle\release-assets-0.1.2\latest.json `
-  --title "CINE WANA v0.1.2" `
+  target\release\bundle\release-assets-0.1.3\CINE.WANA_0.1.3_x64-setup.exe `
+  target\release\bundle\release-assets-0.1.3\CINE.WANA_0.1.3_x64-setup.exe.sig `
+  target\release\bundle\release-assets-0.1.3\latest.json `
+  --title "CINE WANA v0.1.3" `
   --notes "Notas de la version" `
   --latest
 ```

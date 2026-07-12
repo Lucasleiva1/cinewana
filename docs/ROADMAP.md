@@ -28,6 +28,7 @@
 - Internal playback saves watch progress through the existing `watch_progress` database path for continue/resume behavior
 - Added playback-only controls: play/pause, seek, restart, volume, mute, fullscreen, and close
 - Added non-destructive image scanning and runtime adjustments for brightness, contrast, saturation, shadows, highlights, and temperature
+- Added automatic numbered movie-sequel handoff for local sagas, with a cancellable next-up prompt near the end of playback
 
 ## Implemented for local account profiles
 
@@ -45,6 +46,7 @@
 - Added release-asset documentation and a helper script for creating `latest.json` from signed NSIS artifacts
 - Built the first signed Windows x64 NSIS installer and updater signature assets for version 0.1.0
 - Prepared version 0.1.2 to publish a signed GitHub updater release and hide the Windows console host in installed builds
+- Prepared version 0.1.3 as the signed updater release for carousel navigation and automatic sequel handoff
 
 ## Implemented for richer title pages
 

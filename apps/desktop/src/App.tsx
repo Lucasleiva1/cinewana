@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -77,6 +77,7 @@ export function App() {
   const applyMetadataCandidate=async(mediaId:string,candidate:MediaMetadataCandidate)=>{try{setMetadataLoading(true);setError(null);await invoke('apply_metadata_candidate',{mediaId,candidate});const next=await invoke<MediaDetail|null>('media_detail',{id:mediaId});setDetail(next);await refresh();}catch(cause){setError(String(cause));}finally{setMetadataLoading(false);}};
   const playMedia=async(id:string)=>{try{setError(null);const [detail,path]=await Promise.all([invoke<MediaDetail|null>('media_detail',{id}),invoke<string|null>('technical_path',{mediaId:id})]);if(!detail||!path){setError('No se encontró el archivo para reproducir.');return;}const durationMs=detail.runtimeMs||detail.technical.durationMs||0;const resumeMs=detail.completed?0:Math.round(durationMs*(detail.progressPercent/100));setDetail(null);setPlayerSource({detail,path,url:assetUrl(path),resumeMs});}catch(cause){setError(`No se pudo abrir el reproductor interno: ${String(cause)}`);}};
   const openExternalMedia=async(id:string)=>{try{setError(null);await invoke('player_command',{command:{type:'play',media_id:id}});}catch(cause){setError(`No se pudo abrir reproductor externo: ${String(cause)}`);}};
+  const playNextMedia=async(id:string)=>{try{setError(null);const [detail,path]=await Promise.all([invoke<MediaDetail|null>('media_detail',{id}),invoke<string|null>('technical_path',{mediaId:id})]);if(!detail||!path){setError('No se encontro la siguiente parte para reproducir.');return;}setDetail(null);setPlayerSource({detail,path,url:assetUrl(path),resumeMs:0});}catch(cause){setError(`No se pudo abrir la siguiente parte: ${String(cause)}`);}};
   const submitAccount=async(mode:AuthMode,name:string,password:string)=>{if(mode==='create'){setPendingAccount({name,password});return;}try{setError(null);await invoke('login_account',{name,password});setSearch('');setPage('Inicio');await refresh();}catch(cause){setError(String(cause));}};
   const confirmCreateAccount=async()=>{if(!pendingAccount)return;try{setError(null);await invoke('create_account',pendingAccount);setPendingAccount(null);setSearch('');setPage('Inicio');await refresh();}catch(cause){setError(String(cause));setPendingAccount(null);}};
   const logout=async()=>{try{await invoke('logout_account');setDetail(null);setPlayerSource(null);setSearch('');setPage('Inicio');await refresh();}catch(cause){setError(String(cause));}};
@@ -105,7 +106,7 @@ export function App() {
       {!boot?<Loading/>:page==='Configuración'?<SettingsPage boot={boot} scan={scan} updating={updating} updateMessage={updateMessage} updateVersion={availableUpdate?.version} onRescan={rescan} onChoose={chooseFolder} onLogout={logout} onCheckUpdates={checkForUpdates} onInstallUpdate={installAvailableUpdate}/>:page==='Series'?<SeriesPage series={home.series} search={search}/>:page==='Inicio'&&!search?<HomePage home={home} hero={hero} heroIndex={heroIndex} setHeroIndex={setHeroIndex} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>:<CatalogPage title={page} items={visible} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>}
     </main>
     {detail&&<DetailModal detail={detail} close={()=>setDetail(null)} setFlag={setFlag} playMedia={playMedia} openExternalMedia={openExternalMedia} onSaveMetadata={saveMetadata} onRefreshMetadata={refreshMetadata} onApplyCandidate={applyMetadataCandidate} openDetail={openDetail} metadataLoading={metadataLoading}/>}
-    {playerSource&&<InternalPlayer source={playerSource} onClose={()=>setPlayerSource(null)} onOpenExternal={openExternalMedia} onProgressSaved={()=>void refresh()}/>}
+    {playerSource&&<InternalPlayer source={playerSource} onClose={()=>setPlayerSource(null)} onOpenExternal={openExternalMedia} onPlayNext={playNextMedia} onProgressSaved={()=>void refresh()}/>}
   </div>;
 }
 
@@ -162,13 +163,13 @@ function HomePage({home,hero,heroIndex,setHeroIndex,openDetail,setFlag,playMedia
     <MediaRow title="Continuar viendo" items={home.continueWatching} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>
     <MediaRow title="Agregadas recientemente" items={home.recentlyAdded} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>
     <MediaRow title="Películas" items={home.movies} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>
-    <SeriesRow title="Series" series={home.series}/>
+    <SeriesCarouselRow title="Series" series={home.series}/>
     <MediaRow title="Favoritos" items={home.favorites} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>
   </div>
 }
 
 function EmptyLibrary(){return <section className="empty-library"><Library size={42}/><h1>Tu sala está lista</h1><p>Conectá la carpeta predeterminada o elegí otra desde Configuración y después reescaneá.</p></section>}
-function MediaRow(props:{title:string;items:MediaSummary[];openDetail:(id:string)=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void}){if(!props.items.length)return null;return <section className="media-section"><div className="section-title"><h2>{props.title}</h2><span>{props.items.length}</span></div><div className="card-row">{props.items.map(i=><MediaCard key={i.id} item={i} {...props}/>)}</div></section>}
+function MediaRow(props:{title:string;items:MediaSummary[];openDetail:(id:string)=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void}){if(!props.items.length)return null;return <section className="media-section"><div className="section-title"><h2>{props.title}</h2><span>{props.items.length}</span></div><CarouselRow label={props.title}>{props.items.map(i=><MediaCard key={i.id} item={i} {...props}/>)}</CarouselRow></section>}
 function SeriesRow({title,series}:{title:string;series:SeriesSummary[]}){if(!series.length)return null;return <section className="media-section"><div className="section-title"><h2>{title}</h2><span>{series.length}</span></div><div className="card-row">{series.map(s=><article className="media-card" key={s.title}><Poster title={s.title} label="SERIE" src={s.artworkUrl}/><h3>{s.title}</h3><p>{s.seasons} temporada{s.seasons===1?'':'s'} · {s.episodes} episodios</p></article>)}</div></section>}
 
 function CatalogPage({title,items,openDetail,setFlag,playMedia}:{title:string;items:MediaSummary[];openDetail:(id:string)=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void}){return <div className="content catalog-page"><div className="page-heading"><div><span className="eyebrow">TU BIBLIOTECA</span><h1>{title}</h1></div><span>{items.length} resultados</span></div>{items.length?<div className="card-grid">{items.map(i=><MediaCard key={i.id} item={i} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>)}</div>:<div className="empty-results"><Film/><h2>No hay contenido en esta sección</h2><p>Los elementos aparecerán después del próximo escaneo.</p></div>}</div>}
@@ -221,6 +222,69 @@ function DetailModal({detail,close,setFlag,playMedia,openExternalMedia,onSaveMet
       </div>
     </section>
   </div>
+}
+
+function CarouselRow({label,children}:{label:string;children:React.ReactNode}){
+  const rowRef=useRef<HTMLDivElement|null>(null);
+  const drag=useRef({active:false,pointerId:-1,startX:0,scrollLeft:0,moved:false});
+  const [dragging,setDragging]=useState(false);
+  const scrollRow=(direction:-1|1)=>{
+    const row=rowRef.current;
+    if(!row)return;
+    row.scrollBy({left:direction*Math.max(260,row.clientWidth*0.82),behavior:'smooth'});
+  };
+  const startDrag=(event:React.PointerEvent<HTMLDivElement>)=>{
+    if(event.button!==0)return;
+    const row=rowRef.current;
+    if(!row||row.scrollWidth<=row.clientWidth)return;
+    drag.current={active:true,pointerId:event.pointerId,startX:event.clientX,scrollLeft:row.scrollLeft,moved:false};
+    row.setPointerCapture(event.pointerId);
+    setDragging(true);
+  };
+  const moveDrag=(event:React.PointerEvent<HTMLDivElement>)=>{
+    const row=rowRef.current;
+    const state=drag.current;
+    if(!row||!state.active||state.pointerId!==event.pointerId)return;
+    const delta=event.clientX-state.startX;
+    if(Math.abs(delta)>4)state.moved=true;
+    if(state.moved){
+      row.scrollLeft=state.scrollLeft-delta;
+      event.preventDefault();
+    }
+  };
+  const endDrag=(event:React.PointerEvent<HTMLDivElement>)=>{
+    const row=rowRef.current;
+    if(row&&drag.current.pointerId===event.pointerId){
+      try{row.releasePointerCapture(event.pointerId);}catch{}
+    }
+    drag.current.active=false;
+    setDragging(false);
+  };
+  const blockDraggedClick=(event:React.MouseEvent<HTMLDivElement>)=>{
+    if(!drag.current.moved)return;
+    event.preventDefault();
+    event.stopPropagation();
+    drag.current.moved=false;
+  };
+  return <div className="carousel-shell">
+    <button className="carousel-button carousel-button-left" onClick={()=>scrollRow(-1)} aria-label={`Ver anteriores en ${label}`} title="Anteriores"><ChevronLeft size={20}/></button>
+    <div ref={rowRef} className={`card-row ${dragging?'dragging':''}`} onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag} onClickCapture={blockDraggedClick}>{children}</div>
+    <button className="carousel-button carousel-button-right" onClick={()=>scrollRow(1)} aria-label={`Ver siguientes en ${label}`} title="Siguientes"><ChevronRight size={20}/></button>
+  </div>
+}
+
+function SeriesCarouselRow({title,series}:{title:string;series:SeriesSummary[]}){
+  if(!series.length)return null;
+  return <section className="media-section">
+    <div className="section-title"><h2>{title}</h2><span>{series.length}</span></div>
+    <CarouselRow label={title}>
+      {series.map(s=><article className="media-card" key={s.title}>
+        <Poster title={s.title} label="SERIE" src={s.artworkUrl}/>
+        <h3>{s.title}</h3>
+        <p>{s.seasons} temporada{s.seasons===1?'':'s'} · {s.episodes} episodios</p>
+      </article>)}
+    </CarouselRow>
+  </section>
 }
 
 const displayTitle=(item:MediaSummary)=>item.kind==='episode'?(item.seriesTitle||item.title):item.title;
