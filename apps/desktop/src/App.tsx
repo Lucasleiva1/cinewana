@@ -90,20 +90,20 @@ export function App() {
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="brand"><span>CINE</span><strong>WANA</strong></div>
-      <nav>{navigation.map(({label,icon:Icon})=><button key={label} className={page===label?'active':''} onClick={()=>setPage(label)}><Icon size={18}/><span>{label}</span></button>)}</nav>
+      <nav>{navigation.map(({label,icon:Icon})=><button key={label} className={page===label?'active':''} title={label} onClick={()=>setPage(label)}><Icon size={18}/><span>{label}</span></button>)}</nav>
       <div className="sidebar-status"><span className={`status-dot ${boot?.roots.some(r=>r.status==='online')?'online':''}`}/><div><b>{boot?.roots[0]?.status==='online'?'Biblioteca conectada':'Biblioteca sin conexión'}</b><small>{items.length} archivos en catálogo</small></div></div>
     </aside>
     <main>
       <header className="topbar">
         <div className="search"><Search size={18}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar títulos, años y series…"/>{search&&<button onClick={()=>setSearch('')}><X size={16}/></button>}</div>
         {boot?.activeAccount&&<div className="account-pill"><UserRound size={16}/><span>{boot.activeAccount.name}</span><button onClick={logout} title="Cerrar sesión"><LogOut size={15}/></button></div>}
-        <button className={`scan-button ${scan.running?'working':''}`} onClick={rescan}>{scan.running?<><X size={17}/>Cancelar escaneo</>:<><RefreshCw size={17}/>Reescanear biblioteca</>}</button>
+        <button className={`scan-button ${scan.running?'working':''}`} onClick={rescan}>{scan.running?<><X size={17}/><span>Cancelar escaneo</span></>:<><RefreshCw size={17}/><span>Reescanear biblioteca</span></>}</button>
       </header>
 
       {scan.running&&<div className="scan-strip"><LoaderCircle className="spin" size={16}/><div><b>{scan.message||'Escaneando biblioteca'}</b><small>{scan.currentFile||`${scan.found} archivos encontrados`}</small></div><div className="scan-meter"><i style={{width:`${scan.percent}%`}}/></div><span>{Math.round(scan.percent)}%</span></div>}
       {error&&<div className="error-banner"><CircleAlert size={18}/><span>{error}</span><button onClick={()=>setError(null)}><X size={16}/></button></div>}
 
-      {!boot?<Loading/>:page==='Configuración'?<SettingsPage boot={boot} scan={scan} updating={updating} updateMessage={updateMessage} updateVersion={availableUpdate?.version} onRescan={rescan} onChoose={chooseFolder} onLogout={logout} onCheckUpdates={checkForUpdates} onInstallUpdate={installAvailableUpdate}/>:page==='Series'?<SeriesPage series={home.series} search={search}/>:page==='Inicio'&&!search?<HomePage home={home} hero={hero} heroIndex={heroIndex} setHeroIndex={setHeroIndex} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>:<CatalogPage title={page} items={visible} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>}
+      {!boot?<Loading/>:page==='Configuración'?<SettingsPage boot={boot} scan={scan} updating={updating} updateMessage={updateMessage} updateVersion={availableUpdate?.version} onRescan={rescan} onChoose={chooseFolder} onLogout={logout} onCheckUpdates={checkForUpdates} onInstallUpdate={installAvailableUpdate}/>:page==='Series'?<SeriesPage series={home.series} search={search} openDetail={openDetail}/>:page==='Inicio'&&!search?<HomePage home={home} hero={hero} heroIndex={heroIndex} setHeroIndex={setHeroIndex} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>:<CatalogPage title={page} items={visible} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>}
     </main>
     {detail&&<DetailModal detail={detail} close={()=>setDetail(null)} setFlag={setFlag} playMedia={playMedia} openExternalMedia={openExternalMedia} onSaveMetadata={saveMetadata} onRefreshMetadata={refreshMetadata} onApplyCandidate={applyMetadataCandidate} openDetail={openDetail} metadataLoading={metadataLoading}/>}
     {playerSource&&<InternalPlayer source={playerSource} onClose={()=>setPlayerSource(null)} onOpenExternal={openExternalMedia} onPlayNext={playNextMedia} onProgressSaved={()=>void refresh()}/>}
@@ -163,17 +163,15 @@ function HomePage({home,hero,heroIndex,setHeroIndex,openDetail,setFlag,playMedia
     <MediaRow title="Continuar viendo" items={home.continueWatching} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>
     <MediaRow title="Agregadas recientemente" items={home.recentlyAdded} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>
     <MediaRow title="Películas" items={home.movies} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>
-    <SeriesCarouselRow title="Series" series={home.series}/>
+    <SeriesCarouselRow title="Series" series={home.series} openDetail={openDetail}/>
     <MediaRow title="Favoritos" items={home.favorites} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>
   </div>
 }
 
 function EmptyLibrary(){return <section className="empty-library"><Library size={42}/><h1>Tu sala está lista</h1><p>Conectá la carpeta predeterminada o elegí otra desde Configuración y después reescaneá.</p></section>}
 function MediaRow(props:{title:string;items:MediaSummary[];openDetail:(id:string)=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void}){if(!props.items.length)return null;return <section className="media-section"><div className="section-title"><h2>{props.title}</h2><span>{props.items.length}</span></div><CarouselRow label={props.title}>{props.items.map(i=><MediaCard key={i.id} item={i} {...props}/>)}</CarouselRow></section>}
-function SeriesRow({title,series}:{title:string;series:SeriesSummary[]}){if(!series.length)return null;return <section className="media-section"><div className="section-title"><h2>{title}</h2><span>{series.length}</span></div><div className="card-row">{series.map(s=><article className="media-card" key={s.title}><Poster title={s.title} label="SERIE" src={s.artworkUrl}/><h3>{s.title}</h3><p>{s.seasons} temporada{s.seasons===1?'':'s'} · {s.episodes} episodios</p></article>)}</div></section>}
-
 function CatalogPage({title,items,openDetail,setFlag,playMedia}:{title:string;items:MediaSummary[];openDetail:(id:string)=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void}){return <div className="content catalog-page"><div className="page-heading"><div><span className="eyebrow">TU BIBLIOTECA</span><h1>{title}</h1></div><span>{items.length} resultados</span></div>{items.length?<div className="card-grid">{items.map(i=><MediaCard key={i.id} item={i} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>)}</div>:<div className="empty-results"><Film/><h2>No hay contenido en esta sección</h2><p>Los elementos aparecerán después del próximo escaneo.</p></div>}</div>}
-function SeriesPage({series,search}:{series:SeriesSummary[];search:string}){const q=search.toLocaleLowerCase();const list=series.filter(s=>s.title.toLocaleLowerCase().includes(q));return <div className="content catalog-page"><div className="page-heading"><div><span className="eyebrow">EPISODIOS AGRUPADOS</span><h1>Series</h1></div><span>{list.length} series</span></div><div className="card-grid">{list.map(s=><article className="media-card" key={s.title}><Poster title={s.title} label="SERIE" src={s.artworkUrl}/><h3>{s.title}</h3><p>{s.seasons} temporadas · {s.episodes} episodios</p></article>)}</div></div>}
+function SeriesPage({series,search,openDetail}:{series:SeriesSummary[];search:string;openDetail:(id:string)=>void}){const q=search.toLocaleLowerCase();const list=series.filter(s=>s.title.toLocaleLowerCase().includes(q));return <div className="content catalog-page"><div className="page-heading"><div><span className="eyebrow">EPISODIOS AGRUPADOS</span><h1>Series</h1></div><span>{list.length} series</span></div><div className="card-grid">{list.map(s=><SeriesCard key={s.episodeId} series={s} openDetail={openDetail}/>)}</div></div>}
 
 function MediaCard({item,openDetail,setFlag,playMedia}:{item:MediaSummary;openDetail:(id:string)=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void}){return <article className="media-card"><div className="poster-button"><button className="poster-detail" onClick={()=>openDetail(item.id)} aria-label={`Ver detalles de ${displayTitle(item)}`}><Poster title={displayTitle(item)} label={item.kind==='episode'?'SERIE':quality(item)} src={item.artworkUrl}/></button>{item.progressPercent>0&&<span className="card-progress"><i style={{width:`${item.progressPercent}%`}}/></span>}<button className="hover-play" onClick={()=>void playMedia(item.id)} title="Reproducir"><Play fill="currentColor"/></button></div><div className="card-copy"><div><button className="title-link" onClick={()=>openDetail(item.id)}>{displayTitle(item)}</button><p>{item.year||'Sin año'}{item.kind==='episode'?` · T${item.seasonNumber} E${item.episodeNumber}`:''}</p></div><div className="quick-actions"><button className={item.favorite?'selected':''} title="Favorito" onClick={()=>void setFlag(item,'favorite')}><Heart size={15} fill={item.favorite?'currentColor':'none'}/></button><button className={item.inWatchlist?'selected':''} title="Mi lista" onClick={()=>void setFlag(item,'watchlist')}><Bookmark size={15} fill={item.inWatchlist?'currentColor':'none'}/></button></div></div></article>}
 function Poster({title,label,src}:{title:string;label:string;src?:string}){return <div className={`poster ${src?'has-image':''}`} style={{'--poster-hue':hueFor(title)} as React.CSSProperties}>{src&&<img src={assetUrl(src)} alt=""/>}<span className="poster-label">{label}</span>{!src&&<b>{initials(title)}</b>}<small>{title}</small></div>}
@@ -228,11 +226,22 @@ function CarouselRow({label,children}:{label:string;children:React.ReactNode}){
   const rowRef=useRef<HTMLDivElement|null>(null);
   const drag=useRef({active:false,pointerId:-1,startX:0,scrollLeft:0,moved:false});
   const [dragging,setDragging]=useState(false);
+  const [canScroll,setCanScroll]=useState(false);
+  const updateCanScroll=useCallback(()=>{
+    const row=rowRef.current;
+    setCanScroll(Boolean(row&&row.scrollWidth>row.clientWidth+1));
+  },[]);
   const scrollRow=(direction:-1|1)=>{
     const row=rowRef.current;
     if(!row)return;
     row.scrollBy({left:direction*Math.max(260,row.clientWidth*0.82),behavior:'smooth'});
+    window.setTimeout(updateCanScroll,240);
   };
+  useEffect(()=>{
+    updateCanScroll();
+    window.addEventListener('resize',updateCanScroll);
+    return()=>window.removeEventListener('resize',updateCanScroll);
+  },[children,updateCanScroll]);
   const startDrag=(event:React.PointerEvent<HTMLDivElement>)=>{
     if(event.button!==0)return;
     const row=rowRef.current;
@@ -269,24 +278,34 @@ function CarouselRow({label,children}:{label:string;children:React.ReactNode}){
     drag.current.moved=false;
   };
   return <div className="carousel-shell">
-    <button className="carousel-button carousel-button-left" onClick={()=>scrollRow(-1)} aria-label={`Ver anteriores en ${label}`} title="Anteriores"><ChevronLeft size={20}/></button>
-    <div ref={rowRef} className={`card-row ${dragging?'dragging':''}`} onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag} onClickCapture={blockDraggedClick}>{children}</div>
-    <button className="carousel-button carousel-button-right" onClick={()=>scrollRow(1)} aria-label={`Ver siguientes en ${label}`} title="Siguientes"><ChevronRight size={20}/></button>
+    {canScroll&&<button className="carousel-button carousel-button-left" onClick={()=>scrollRow(-1)} aria-label={`Ver anteriores en ${label}`} title="Anteriores"><ChevronLeft size={20}/></button>}
+    <div ref={rowRef} className={`card-row ${dragging?'dragging':''}`} onScroll={updateCanScroll} onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag} onClickCapture={blockDraggedClick}>{children}</div>
+    {canScroll&&<button className="carousel-button carousel-button-right" onClick={()=>scrollRow(1)} aria-label={`Ver siguientes en ${label}`} title="Siguientes"><ChevronRight size={20}/></button>}
   </div>
 }
 
-function SeriesCarouselRow({title,series}:{title:string;series:SeriesSummary[]}){
+function SeriesCarouselRow({title,series,openDetail}:{title:string;series:SeriesSummary[];openDetail:(id:string)=>void}){
   if(!series.length)return null;
   return <section className="media-section">
     <div className="section-title"><h2>{title}</h2><span>{series.length}</span></div>
     <CarouselRow label={title}>
-      {series.map(s=><article className="media-card" key={s.title}>
-        <Poster title={s.title} label="SERIE" src={s.artworkUrl}/>
-        <h3>{s.title}</h3>
-        <p>{s.seasons} temporada{s.seasons===1?'':'s'} · {s.episodes} episodios</p>
-      </article>)}
+      {series.map(s=><SeriesCard key={s.episodeId} series={s} openDetail={openDetail}/>)}
     </CarouselRow>
   </section>
+}
+
+function SeriesCard({series,openDetail}:{series:SeriesSummary;openDetail:(id:string)=>void}){
+  return <article className="media-card series-card">
+    <button className="poster-detail" onClick={()=>openDetail(series.episodeId)} aria-label={`Ver detalles de ${series.title}`}>
+      <Poster title={series.title} label="SERIE" src={series.artworkUrl}/>
+    </button>
+    <div className="card-copy">
+      <div>
+        <button className="title-link" onClick={()=>openDetail(series.episodeId)}>{series.title}</button>
+        <p>{series.seasons} temporada{series.seasons===1?'':'s'} · {series.episodes} episodios</p>
+      </div>
+    </div>
+  </article>
 }
 
 const displayTitle=(item:MediaSummary)=>item.kind==='episode'?(item.seriesTitle||item.title):item.title;

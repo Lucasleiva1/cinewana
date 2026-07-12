@@ -145,7 +145,9 @@ impl WikipediaMetadataClient {
     }
 
     async fn fetch_json<T: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<T> {
-        let output = Command::new(&self.curl)
+        let mut command = Command::new(&self.curl);
+        hide_console_window(&mut command);
+        let output = command
             .args([
                 "-L",
                 "--fail",
@@ -169,6 +171,14 @@ impl WikipediaMetadataClient {
         serde_json::from_slice(&output.stdout).context("parse Wikipedia JSON")
     }
 }
+
+#[cfg(windows)]
+fn hide_console_window(command: &mut Command) {
+    command.creation_flags(0x08000000);
+}
+
+#[cfg(not(windows))]
+fn hide_console_window(_command: &mut Command) {}
 
 pub fn write_metadata_json(
     cache_root: &Path,

@@ -61,7 +61,9 @@ pub async fn inspect(path: &Path, ffprobe: Option<&Path>) -> Result<DiscoveredFi
 }
 
 pub async fn probe(executable: &Path, path: &Path) -> Result<MediaTechnical> {
-    let output = Command::new(executable)
+    let mut command = Command::new(executable);
+    hide_console_window(&mut command);
+    let output = command
         .args([
             "-v",
             "error",
@@ -259,6 +261,7 @@ async fn run_ffmpeg(
         .arg(output)
         .stdin(Stdio::null())
         .kill_on_drop(true);
+    hide_console_window(&mut command);
     let result = command.output().await.context("launch ffmpeg")?;
     if !result.status.success() {
         let _ = std::fs::remove_file(output);
@@ -269,6 +272,14 @@ async fn run_ffmpeg(
     }
     Ok(())
 }
+
+#[cfg(windows)]
+fn hide_console_window(command: &mut Command) {
+    command.creation_flags(0x08000000);
+}
+
+#[cfg(not(windows))]
+fn hide_console_window(_command: &mut Command) {}
 
 fn valid_cache_file(path: &Path, minimum_size: u64) -> bool {
     path.metadata()

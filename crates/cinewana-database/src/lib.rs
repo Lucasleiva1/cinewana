@@ -657,7 +657,7 @@ impl Database {
             .collect();
         let heroes = movies.iter().take(3).cloned().collect();
         let recently_added = movies.iter().take(30).cloned().collect();
-        let mut series_map: BTreeMap<String, (BTreeSet<i32>, u32, String, Option<String>)> =
+        let mut series_map: BTreeMap<String, (BTreeSet<i32>, u32, String, Option<String>, String)> =
             BTreeMap::new();
         for item in all.iter().filter(|m| m.kind == MediaKind::Episode) {
             let title = item
@@ -669,10 +669,14 @@ impl Database {
                 0,
                 item.added_at.clone(),
                 item.artwork_url.clone(),
+                item.id.clone(),
             ));
             entry.1 += 1;
             entry.0.insert(item.season_number.unwrap_or(0));
-            entry.2 = entry.2.clone().max(item.added_at.clone());
+            if item.added_at > entry.2 {
+                entry.2 = item.added_at.clone();
+                entry.4 = item.id.clone();
+            }
             if entry.3.is_none() {
                 entry.3 = item.artwork_url.clone();
             }
@@ -680,12 +684,15 @@ impl Database {
         let series = series_map
             .into_iter()
             .map(
-                |(title, (seasons, episodes, latest_added_at, artwork_url))| SeriesSummary {
-                    title,
-                    seasons: seasons.len() as u32,
-                    episodes,
-                    artwork_url,
-                    latest_added_at,
+                |(title, (seasons, episodes, latest_added_at, artwork_url, episode_id))| {
+                    SeriesSummary {
+                        episode_id,
+                        title,
+                        seasons: seasons.len() as u32,
+                        episodes,
+                        artwork_url,
+                        latest_added_at,
+                    }
                 },
             )
             .collect();

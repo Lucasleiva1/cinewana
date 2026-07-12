@@ -7,7 +7,7 @@ export interface MediaSummary {
   progressPercent: number; favorite: boolean; inWatchlist: boolean; completed: boolean; offline: boolean; addedAt: string;
   artworkUrl?: string; backdropUrl?: string; previewUrl?: string; technical: MediaTechnical;
 }
-export interface SeriesSummary { title: string; seasons: number; episodes: number; artworkUrl?: string; latestAddedAt: string }
+export interface SeriesSummary { episodeId: string; title: string; seasons: number; episodes: number; artworkUrl?: string; latestAddedAt: string }
 export interface HomeDto { heroes: MediaSummary[]; continueWatching: MediaSummary[]; recentlyAdded: MediaSummary[]; movies: MediaSummary[]; series: SeriesSummary[]; favorites: MediaSummary[] }
 export interface LibraryRoot { id:string; displayName:string; enabled:boolean; recursive:boolean; watchEnabled:boolean; status:RootStatus; lastScanAt?:string; disconnectedCount:number; localPath?:string }
 export interface Account { id:string; name:string }

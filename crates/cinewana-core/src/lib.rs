@@ -201,6 +201,7 @@ pub struct HomeDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SeriesSummary {
+    pub episode_id: String,
     pub title: String,
     pub seasons: u32,
     pub episodes: u32,

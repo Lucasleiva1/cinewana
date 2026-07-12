@@ -63,6 +63,7 @@ export function InternalPlayer({
   const controlsTimerRef = useRef<number | null>(null);
   const lastSavedAtRef = useRef(0);
   const lastPointerRef = useRef({ x: 0, y: 0, ready: false });
+  const initialWindowFullscreenRef = useRef<boolean | null>(null);
   const restoredRef = useRef(false);
   const nextStartedAtRef = useRef<number | null>(null);
   const [playing, setPlaying] = useState(true);
@@ -126,11 +127,12 @@ export function InternalPlayer({
     }
   }, []);
 
-  const exitFullscreenMode = useCallback(async () => {
+  const restoreWindowFullscreenMode = useCallback(async () => {
+    const initialFullscreen = initialWindowFullscreenRef.current;
     try {
       const appWindow = getCurrentWindow();
-      if (await appWindow.isFullscreen()) {
-        await appWindow.setFullscreen(false);
+      if (initialFullscreen !== null && (await appWindow.isFullscreen()) !== initialFullscreen) {
+        await appWindow.setFullscreen(initialFullscreen);
       }
     } catch {
       /* Fall back to browser fullscreen below. */
@@ -138,16 +140,16 @@ export function InternalPlayer({
     if (document.fullscreenElement) {
       await document.exitFullscreen().catch(() => {});
     }
-    setFullscreen(false);
+    setFullscreen(Boolean(initialFullscreen));
   }, []);
 
   const closePlayer = useCallback(() => {
     void (async () => {
       await saveProgress(true).catch(() => {});
-      await exitFullscreenMode();
+      await restoreWindowFullscreenMode();
       onClose();
     })();
-  }, [exitFullscreenMode, onClose, saveProgress]);
+  }, [onClose, restoreWindowFullscreenMode, saveProgress]);
 
   const togglePlay = useCallback(() => {
     const video = videoRef.current;
@@ -215,9 +217,9 @@ export function InternalPlayer({
     if (video) video.pause();
     setPlaying(false);
     await saveProgress(true);
-    await exitFullscreenMode();
+    await restoreWindowFullscreenMode();
     await onOpenExternal(source.detail.id);
-  }, [exitFullscreenMode, onOpenExternal, saveProgress, source.detail.id]);
+  }, [onOpenExternal, restoreWindowFullscreenMode, saveProgress, source.detail.id]);
 
   const beginNextPrompt = useCallback(() => {
     if (!nextMovie || nextDismissed || nextPromptVisible) return;
@@ -351,11 +353,22 @@ export function InternalPlayer({
   }, []);
 
   useEffect(() => {
+    void (async () => {
+      try {
+        const appWindow = getCurrentWindow();
+        const isFullscreen = await appWindow.isFullscreen();
+        initialWindowFullscreenRef.current = isFullscreen;
+        setFullscreen(isFullscreen || Boolean(document.fullscreenElement));
+      } catch {
+        initialWindowFullscreenRef.current = Boolean(document.fullscreenElement);
+        setFullscreen(Boolean(document.fullscreenElement));
+      }
+    })();
     return () => {
       clearControlsTimer();
-      void exitFullscreenMode();
+      void restoreWindowFullscreenMode();
     };
-  }, [clearControlsTimer, exitFullscreenMode]);
+  }, [clearControlsTimer, restoreWindowFullscreenMode]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {

@@ -49,6 +49,9 @@
 - Prepared version 0.1.3 as the signed updater release for carousel navigation and automatic sequel handoff
 - Prepared version 0.1.4 to keep carousel drag navigation while preserving normal card click/play behavior
 - Prepared version 0.1.5 to auto-hide internal player controls during playback and use native fullscreen
+- Fixed desktop window startup, clickable series cards, bottom-safe browsing space, and hidden external scan helper windows
+- Added responsive desktop window modes down to compact floating playback sizes
+- Prepared version 0.1.6 as the responsive desktop-window updater release
 
 ## Implemented for richer title pages
 
