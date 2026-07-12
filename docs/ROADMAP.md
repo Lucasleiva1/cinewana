@@ -48,6 +48,7 @@
 - Prepared version 0.1.2 to publish a signed GitHub updater release and hide the Windows console host in installed builds
 - Prepared version 0.1.3 as the signed updater release for carousel navigation and automatic sequel handoff
 - Prepared version 0.1.4 to keep carousel drag navigation while preserving normal card click/play behavior
+- Prepared version 0.1.5 to auto-hide internal player controls during playback and use native fullscreen
 
 ## Implemented for richer title pages
 

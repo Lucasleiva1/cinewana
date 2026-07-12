@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   ExternalLink, Maximize, Pause, Play, RotateCcw, SkipBack, SkipForward,
   SlidersHorizontal, Sparkles, Volume2, VolumeX, X
@@ -41,6 +42,7 @@ const defaultImage: ImageSettings = {
 
 const NEXT_CREDITS_LEAD_SECONDS = 30;
 const NEXT_COUNTDOWN_SECONDS = 8;
+const CONTROLS_HIDE_DELAY_MS = 2600;
 
 export function InternalPlayer({
   source,
@@ -58,7 +60,9 @@ export function InternalPlayer({
   const videoRef = useRef<HTMLVideoElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
   const saveTimerRef = useRef<number | null>(null);
+  const controlsTimerRef = useRef<number | null>(null);
   const lastSavedAtRef = useRef(0);
+  const lastPointerRef = useRef({ x: 0, y: 0, ready: false });
   const restoredRef = useRef(false);
   const nextStartedAtRef = useRef<number | null>(null);
   const [playing, setPlaying] = useState(true);
@@ -66,6 +70,7 @@ export function InternalPlayer({
   const [duration, setDuration] = useState(() => msToSeconds(source.detail.runtimeMs ?? source.detail.technical.durationMs ?? 0));
   const [volume, setVolume] = useState(0.82);
   const [muted, setMuted] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [showImagePanel, setShowImagePanel] = useState(false);
   const [image, setImage] = useState<ImageSettings>(defaultImage);
@@ -114,9 +119,35 @@ export function InternalPlayer({
     if (force) onProgressSaved();
   }, [current, duration, onProgressSaved, source.detail.id]);
 
+  const clearControlsTimer = useCallback(() => {
+    if (controlsTimerRef.current) {
+      window.clearTimeout(controlsTimerRef.current);
+      controlsTimerRef.current = null;
+    }
+  }, []);
+
+  const exitFullscreenMode = useCallback(async () => {
+    try {
+      const appWindow = getCurrentWindow();
+      if (await appWindow.isFullscreen()) {
+        await appWindow.setFullscreen(false);
+      }
+    } catch {
+      /* Fall back to browser fullscreen below. */
+    }
+    if (document.fullscreenElement) {
+      await document.exitFullscreen().catch(() => {});
+    }
+    setFullscreen(false);
+  }, []);
+
   const closePlayer = useCallback(() => {
-    void saveProgress(true).finally(onClose);
-  }, [onClose, saveProgress]);
+    void (async () => {
+      await saveProgress(true).catch(() => {});
+      await exitFullscreenMode();
+      onClose();
+    })();
+  }, [exitFullscreenMode, onClose, saveProgress]);
 
   const togglePlay = useCallback(() => {
     const video = videoRef.current;
@@ -147,13 +178,36 @@ export function InternalPlayer({
   }, [duration]);
 
   const toggleFullscreen = useCallback(() => {
-    const target = shellRef.current;
-    if (!target) return;
-    if (document.fullscreenElement) {
-      void document.exitFullscreen();
-    } else {
-      void target.requestFullscreen().catch(() => setError('No se pudo activar pantalla completa.'));
-    }
+    void (async () => {
+      const target = shellRef.current;
+      try {
+        const appWindow = getCurrentWindow();
+        const active = (await appWindow.isFullscreen()) || Boolean(document.fullscreenElement);
+        const next = !active;
+        await appWindow.setFullscreen(next);
+        if (!next && document.fullscreenElement) {
+          await document.exitFullscreen().catch(() => {});
+        }
+        setFullscreen(next);
+        setControlsVisible(true);
+        return;
+      } catch {
+        /* Browser fullscreen is the fallback when the native call is unavailable. */
+      }
+      if (!target) return;
+      try {
+        if (document.fullscreenElement) {
+          await document.exitFullscreen();
+          setFullscreen(false);
+        } else {
+          await target.requestFullscreen();
+          setFullscreen(true);
+        }
+        setControlsVisible(true);
+      } catch {
+        setError('No se pudo activar pantalla completa.');
+      }
+    })();
   }, []);
 
   const openExternal = useCallback(async () => {
@@ -161,8 +215,9 @@ export function InternalPlayer({
     if (video) video.pause();
     setPlaying(false);
     await saveProgress(true);
+    await exitFullscreenMode();
     await onOpenExternal(source.detail.id);
-  }, [onOpenExternal, saveProgress, source.detail.id]);
+  }, [exitFullscreenMode, onOpenExternal, saveProgress, source.detail.id]);
 
   const beginNextPrompt = useCallback(() => {
     if (!nextMovie || nextDismissed || nextPromptVisible) return;
@@ -259,13 +314,34 @@ export function InternalPlayer({
   }, [analyzing, duration]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => setControlsVisible(false), 3600);
-    return () => window.clearTimeout(timer);
-  }, [current, controlsVisible]);
+    clearControlsTimer();
+    if (!playing || showImagePanel || nextPromptVisible || error) {
+      setControlsVisible(true);
+      return;
+    }
+    if (controlsVisible) {
+      controlsTimerRef.current = window.setTimeout(() => {
+        setControlsVisible(false);
+        controlsTimerRef.current = null;
+      }, CONTROLS_HIDE_DELAY_MS);
+    }
+    return clearControlsTimer;
+  }, [clearControlsTimer, controlsVisible, error, nextPromptVisible, playing, showImagePanel]);
 
   useEffect(() => {
-    const onMove = () => setControlsVisible(true);
-    const onFullscreen = () => setControlsVisible(true);
+    const revealControls = () => {
+      setControlsVisible(true);
+    };
+    const onMove = (event: MouseEvent) => {
+      const last = lastPointerRef.current;
+      if (last.ready && Math.abs(event.clientX - last.x) < 2 && Math.abs(event.clientY - last.y) < 2) return;
+      lastPointerRef.current = { x: event.clientX, y: event.clientY, ready: true };
+      revealControls();
+    };
+    const onFullscreen = () => {
+      setFullscreen(Boolean(document.fullscreenElement));
+      revealControls();
+    };
     window.addEventListener('mousemove', onMove);
     document.addEventListener('fullscreenchange', onFullscreen);
     return () => {
@@ -273,6 +349,13 @@ export function InternalPlayer({
       document.removeEventListener('fullscreenchange', onFullscreen);
     };
   }, []);
+
+  useEffect(() => {
+    return () => {
+      clearControlsTimer();
+      void exitFullscreenMode();
+    };
+  }, [clearControlsTimer, exitFullscreenMode]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -283,11 +366,18 @@ export function InternalPlayer({
       if (event.key.toLowerCase() === 'l' || event.key === 'ArrowRight') { event.preventDefault(); seekBy(10); }
       if (event.key.toLowerCase() === 'm') { event.preventDefault(); setMuted(value => !value); }
       if (event.key.toLowerCase() === 'f') { event.preventDefault(); toggleFullscreen(); }
-      if (event.key === 'Escape') { event.preventDefault(); closePlayer(); }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        if (fullscreen || document.fullscreenElement) {
+          toggleFullscreen();
+        } else {
+          closePlayer();
+        }
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [closePlayer, seekBy, toggleFullscreen, togglePlay]);
+  }, [closePlayer, fullscreen, seekBy, toggleFullscreen, togglePlay]);
 
   useEffect(() => {
     return () => {
@@ -350,7 +440,7 @@ export function InternalPlayer({
   const progress = duration > 0 ? clamp(current / duration, 0, 1) : 0;
 
   return (
-    <div ref={shellRef} className={`cw-player-shell ${controlsVisible ? '' : 'idle'}`} onMouseMove={() => setControlsVisible(true)}>
+    <div ref={shellRef} className={`cw-player-shell ${controlsVisible ? '' : 'idle'}`}>
       <video
         ref={videoRef}
         className="cw-player-video"
@@ -513,7 +603,7 @@ export function InternalPlayer({
               setMuted(next === 0);
             }}/>
             <button className={showImagePanel ? 'selected' : ''} onClick={() => setShowImagePanel(value => !value)}><SlidersHorizontal size={19}/><span>Imagen</span></button>
-            <button onClick={toggleFullscreen}><Maximize size={19}/></button>
+            <button className={fullscreen ? 'selected' : ''} onClick={toggleFullscreen} title="Pantalla completa"><Maximize size={19}/></button>
           </div>
         </div>
       </div>
