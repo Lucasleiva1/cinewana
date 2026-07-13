@@ -1,5 +1,5 @@
 import { mockConvertFileSrc, mockIPC, mockWindows } from '@tauri-apps/api/mocks';
-import type { Bootstrap, HomeDto, MediaDetail, MediaSummary, ScanProgress, SeriesSummary } from './types';
+import type { Bootstrap, HomeDto, ImageAnalysis, MediaDetail, MediaSummary, ScanProgress, SeriesSummary } from './types';
 
 const now = new Date().toISOString();
 const scan: ScanProgress = { running:false, cancelRequested:false, found:16, processed:16, skipped:0, errors:0, percent:100 };
@@ -93,6 +93,16 @@ const boot: Bootstrap = {
   playerAvailable:true
 };
 
+const imageAnalysis: ImageAnalysis = {
+  averageLight:42,
+  shadowsPercent:31,
+  highlightsPercent:6,
+  averageSaturation:28,
+  warmth:7,
+  sampledFrames:18,
+  suggested:{ brightness:3, contrast:8, saturation:6, shadows:6, highlights:-2, temperature:-3 }
+};
+
 export function installDevTauriMock() {
   mockWindows('main');
   mockConvertFileSrc('windows');
@@ -109,6 +119,8 @@ export function installDevTauriMock() {
       }
       case 'technical_path':
         return 'D:\\peliculas-y-series\\sample.mp4';
+      case 'analyze_media_image':
+        return imageAnalysis;
       case 'start_scan':
       case 'cancel_scan':
         return scan;

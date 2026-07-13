@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use cinewana_core::{MediaTechnical, is_supported_video, parse_media_name};
+use cinewana_core::{
+    ImageAdjustment, ImageAnalysis, MediaTechnical, is_supported_video, parse_media_name,
+};
 use cinewana_database::DiscoveredFile;
 use serde_json::Value;
 use std::{
@@ -7,10 +9,14 @@ use std::{
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Stdio,
-    time::UNIX_EPOCH,
+    time::{Duration, UNIX_EPOCH},
 };
 use tokio::process::Command;
 use walkdir::WalkDir;
+
+const ANALYSIS_WIDTH: usize = 160;
+const ANALYSIS_HEIGHT: usize = 90;
+const ANALYSIS_FRAME_BYTES: usize = ANALYSIS_WIDTH * ANALYSIS_HEIGHT * 3;
 
 pub fn discover(root: &Path, recursive: bool) -> Result<Vec<PathBuf>> {
     let depth = if recursive { usize::MAX } else { 1 };
@@ -192,6 +198,54 @@ pub async fn generate_artwork(
     ))
 }
 
+pub async fn analyze_image(
+    ffmpeg: &Path,
+    video: &Path,
+    duration_ms: Option<i64>,
+) -> Result<ImageAnalysis> {
+    analyze_image_with_progress(ffmpeg, video, duration_ms, |_, _, _| {}).await
+}
+
+pub async fn analyze_image_with_progress<F>(
+    ffmpeg: &Path,
+    video: &Path,
+    duration_ms: Option<i64>,
+    mut progress: F,
+) -> Result<ImageAnalysis>
+where
+    F: FnMut(u32, u32, u32),
+{
+    let seek_points = analysis_seek_points(duration_ms);
+    let total = seek_points.len() as u32;
+    let mut frames = Vec::new();
+    let mut last_error = None;
+    progress(0, total, 0);
+    for (index, seek_seconds) in seek_points.into_iter().enumerate() {
+        match sample_analysis_frame(ffmpeg, video, seek_seconds).await {
+            Ok(frame) if frame.len() >= ANALYSIS_FRAME_BYTES => frames.push(frame),
+            Ok(frame) => {
+                last_error = Some(anyhow::anyhow!(
+                    "ffmpeg returned {} bytes for an image sample",
+                    frame.len()
+                ));
+            }
+            Err(error) => last_error = Some(error),
+        }
+        progress((index + 1) as u32, total, frames.len() as u32);
+    }
+    if frames.is_empty() {
+        if let Some(error) = last_error {
+            return Err(error).context("No se pudo leer ninguna escena del video");
+        }
+        anyhow::bail!("No se pudo leer ninguna escena del video");
+    }
+    Ok(analyze_rgb_samples(
+        &frames,
+        ANALYSIS_WIDTH,
+        ANALYSIS_HEIGHT,
+    ))
+}
+
 fn seek_points(duration_ms: Option<i64>) -> Vec<f64> {
     let Some(duration_ms) = duration_ms else {
         return vec![30.0, 60.0, 120.0, 10.0, 2.0];
@@ -205,6 +259,219 @@ fn seek_points(duration_ms: Option<i64>) -> Vec<f64> {
         .into_iter()
         .map(|ratio| (duration * ratio).clamp(1.0, end_safe))
         .collect()
+}
+
+fn analysis_seek_points(duration_ms: Option<i64>) -> Vec<f64> {
+    let Some(duration_ms) = duration_ms else {
+        return vec![
+            2.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1_200.0, 1_800.0, 2_400.0, 3_000.0,
+            3_600.0, 4_500.0, 5_400.0, 6_300.0,
+        ];
+    };
+    let duration = duration_ms as f64 / 1000.0;
+    if duration <= 6.0 {
+        let end_safe = (duration - 0.2).max(0.1);
+        return [0.18, 0.5, 0.82]
+            .into_iter()
+            .map(|ratio| (duration * ratio).clamp(0.05, end_safe))
+            .collect();
+    }
+    let samples = ((duration / 240.0).round() as usize).clamp(12, 32);
+    let end_safe = (duration - 1.0).max(1.0);
+    (0..samples)
+        .map(|index| ((index as f64 + 0.5) / samples as f64) * end_safe)
+        .map(|seconds| seconds.clamp(0.75, end_safe))
+        .collect()
+}
+
+async fn sample_analysis_frame(ffmpeg: &Path, video: &Path, seek_seconds: f64) -> Result<Vec<u8>> {
+    let seek = format!("{seek_seconds:.3}");
+    let filter =
+        format!("scale={ANALYSIS_WIDTH}:{ANALYSIS_HEIGHT}:flags=fast_bilinear,format=rgb24");
+    let mut command = Command::new(ffmpeg);
+    command
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-ss",
+            &seek,
+            "-i",
+        ])
+        .arg(video)
+        .args([
+            "-map",
+            "0:v:0",
+            "-frames:v",
+            "1",
+            "-an",
+            "-sn",
+            "-vf",
+            &filter,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ])
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    hide_console_window(&mut command);
+    let output = tokio::time::timeout(Duration::from_secs(15), command.output())
+        .await
+        .context("ffmpeg image analysis timed out")?
+        .context("launch ffmpeg")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "ffmpeg image analysis failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(output.stdout)
+}
+
+fn analyze_rgb_samples(samples: &[Vec<u8>], width: usize, height: usize) -> ImageAnalysis {
+    let expected = width * height * 3;
+    let mut luma_total = 0.0;
+    let mut saturation_total = 0.0;
+    let mut red_total = 0.0;
+    let mut blue_total = 0.0;
+    let mut pixels_total = 0u64;
+    let mut shadows = 0u64;
+    let mut highlights = 0u64;
+    let mut histogram = [0u64; 256];
+
+    for frame in samples {
+        if frame.len() < expected {
+            continue;
+        }
+        for pixel in frame[..expected].chunks_exact(3) {
+            let r = pixel[0] as f64;
+            let g = pixel[1] as f64;
+            let b = pixel[2] as f64;
+            let luma = r * 0.2126 + g * 0.7152 + b * 0.0722;
+            let max_channel = r.max(g).max(b);
+            let min_channel = r.min(g).min(b);
+            let saturation = if max_channel > 0.0 {
+                (max_channel - min_channel) / max_channel
+            } else {
+                0.0
+            };
+            let bucket = luma.round().clamp(0.0, 255.0) as usize;
+            histogram[bucket] += 1;
+            luma_total += luma;
+            saturation_total += saturation;
+            red_total += r;
+            blue_total += b;
+            pixels_total += 1;
+            if luma < 45.0 {
+                shadows += 1;
+            }
+            if luma > 210.0 {
+                highlights += 1;
+            }
+        }
+    }
+
+    if pixels_total == 0 {
+        return ImageAnalysis::default();
+    }
+
+    let average_luma = luma_total / pixels_total as f64;
+    let average_saturation = saturation_total / pixels_total as f64 * 100.0;
+    let warmth = ((red_total - blue_total) / pixels_total as f64 / 255.0 * 100.0).round() as i32;
+    let shadows_percent = percent(shadows, pixels_total);
+    let highlights_percent = percent(highlights, pixels_total);
+    let p10 = histogram_percentile(&histogram, pixels_total, 0.10) as f64;
+    let p90 = histogram_percentile(&histogram, pixels_total, 0.90) as f64;
+
+    ImageAnalysis {
+        average_light: ((average_luma / 255.0) * 100.0).round() as u32,
+        shadows_percent,
+        highlights_percent,
+        average_saturation: average_saturation.round() as u32,
+        warmth,
+        sampled_frames: samples.len() as u32,
+        suggested: suggest_image_adjustment(
+            average_luma,
+            shadows_percent as f64,
+            highlights_percent as f64,
+            average_saturation,
+            warmth as f64,
+            p90 - p10,
+            p10,
+            p90,
+        ),
+    }
+}
+
+fn suggest_image_adjustment(
+    average_luma: f64,
+    shadows_percent: f64,
+    highlights_percent: f64,
+    average_saturation: f64,
+    warmth: f64,
+    dynamic_range: f64,
+    p10: f64,
+    p90: f64,
+) -> ImageAdjustment {
+    let average_light = average_luma / 255.0 * 100.0;
+    let brightness = clamp_i32(((50.0 - average_light) / 2.6).round() as i32, -18, 18);
+    let mut contrast = clamp_i32(((145.0 - dynamic_range) / 7.0).round() as i32, -8, 16);
+    if dynamic_range < 90.0 {
+        contrast = clamp_i32(contrast + 4, -8, 16);
+    }
+    let shadows = if p10 > 42.0 && shadows_percent < 8.0 {
+        -6
+    } else {
+        clamp_i32(((shadows_percent - 18.0) / 2.3).round() as i32, 0, 28)
+    };
+    let highlights = if highlights_percent > 5.0 {
+        -clamp_i32(((highlights_percent - 3.0) / 2.0).round() as i32, 1, 24)
+    } else if p90 < 175.0 && average_light < 48.0 {
+        4
+    } else {
+        0
+    };
+    let saturation = clamp_i32(
+        ((34.0 - average_saturation) / 2.4).round() as i32 + 4,
+        -8,
+        16,
+    );
+    let temperature = clamp_i32((-warmth / 2.2).round() as i32, -14, 14);
+    ImageAdjustment {
+        brightness,
+        contrast,
+        saturation,
+        shadows,
+        highlights,
+        temperature,
+    }
+}
+
+fn percent(part: u64, total: u64) -> u32 {
+    if total == 0 {
+        0
+    } else {
+        (part as f64 / total as f64 * 100.0).round() as u32
+    }
+}
+
+fn histogram_percentile(histogram: &[u64; 256], total: u64, percentile: f64) -> u8 {
+    let target = ((total as f64 * percentile).ceil() as u64).max(1);
+    let mut seen = 0u64;
+    for (value, count) in histogram.iter().enumerate() {
+        seen += *count;
+        if seen >= target {
+            return value as u8;
+        }
+    }
+    255
+}
+
+fn clamp_i32(value: i32, min: i32, max: i32) -> i32 {
+    value.max(min).min(max)
 }
 
 async fn generate_frame(
@@ -391,6 +658,14 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn solid_frame(red: u8, green: u8, blue: u8) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(ANALYSIS_FRAME_BYTES);
+        for _ in 0..(ANALYSIS_WIDTH * ANALYSIS_HEIGHT) {
+            frame.extend_from_slice(&[red, green, blue]);
+        }
+        frame
+    }
+
     #[test]
     fn parses_probe_json() {
         let parsed = parse_ffprobe(&json!({
@@ -400,5 +675,26 @@ mod tests {
         assert_eq!(parsed.duration_ms, Some(120_500));
         assert_eq!(parsed.height, Some(2160));
         assert_eq!(parsed.hdr_type.as_deref(), Some("HDR10"));
+    }
+
+    #[test]
+    fn analysis_suggests_lifting_dark_flat_video() {
+        let frames = vec![solid_frame(28, 30, 32)];
+        let analysis = analyze_rgb_samples(&frames, ANALYSIS_WIDTH, ANALYSIS_HEIGHT);
+
+        assert!(analysis.average_light < 15);
+        assert!(analysis.shadows_percent > 90);
+        assert!(analysis.suggested.brightness > 0);
+        assert!(analysis.suggested.shadows > 0);
+        assert!(analysis.suggested.saturation > 0);
+    }
+
+    #[test]
+    fn analysis_cools_strong_warm_cast_gently() {
+        let frames = vec![solid_frame(180, 120, 70)];
+        let analysis = analyze_rgb_samples(&frames, ANALYSIS_WIDTH, ANALYSIS_HEIGHT);
+
+        assert!(analysis.warmth > 0);
+        assert!(analysis.suggested.temperature < 0);
     }
 }

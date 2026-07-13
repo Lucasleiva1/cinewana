@@ -221,6 +221,40 @@ pub struct BootstrapDto {
     pub player_available: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageAdjustment {
+    pub brightness: i32,
+    pub contrast: i32,
+    pub saturation: i32,
+    pub shadows: i32,
+    pub highlights: i32,
+    pub temperature: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageAnalysis {
+    pub average_light: u32,
+    pub shadows_percent: u32,
+    pub highlights_percent: u32,
+    pub average_saturation: u32,
+    pub warmth: i32,
+    pub sampled_frames: u32,
+    pub suggested: ImageAdjustment,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageAnalysisProgress {
+    pub media_id: String,
+    pub running: bool,
+    pub processed_frames: u32,
+    pub total_frames: u32,
+    pub sampled_frames: u32,
+    pub percent: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageProfile {

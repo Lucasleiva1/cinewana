@@ -2,6 +2,14 @@ export type MediaKind = 'movie' | 'episode';
 export type RootStatus = 'online' | 'disconnected' | 'scanning' | 'error';
 
 export interface MediaTechnical { durationMs?: number; width?: number; height?: number; container?: string; videoCodec?: string; audioCodec?: string; hdrType?: string }
+export interface ImageSettings { brightness: number; contrast: number; saturation: number; shadows: number; highlights: number; temperature: number }
+export interface ImageAnalysis {
+  averageLight: number; shadowsPercent: number; highlightsPercent: number; averageSaturation: number; warmth: number;
+  sampledFrames: number; suggested: ImageSettings;
+}
+export interface ImageAnalysisProgress {
+  mediaId: string; running: boolean; processedFrames: number; totalFrames: number; sampledFrames: number; percent: number;
+}
 export interface MediaSummary {
   id: string; kind: MediaKind; title: string; year?: number; seriesTitle?: string; seasonNumber?: number; episodeNumber?: number;
   progressPercent: number; favorite: boolean; inWatchlist: boolean; completed: boolean; offline: boolean; addedAt: string;

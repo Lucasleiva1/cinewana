@@ -1,34 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   ExternalLink, Maximize, Pause, Play, RotateCcw, SkipBack, SkipForward,
   SlidersHorizontal, Sparkles, Volume2, VolumeX, X
 } from 'lucide-react';
-import type { MediaDetail, MediaSummary } from './types';
+import type { ImageAnalysis, ImageAnalysisProgress, ImageSettings, MediaDetail, MediaSummary } from './types';
 
 export interface InternalPlayerSource {
   detail: MediaDetail;
   path: string;
   url: string;
   resumeMs: number;
-}
-
-interface ImageSettings {
-  brightness: number;
-  contrast: number;
-  saturation: number;
-  shadows: number;
-  highlights: number;
-  temperature: number;
-}
-
-interface ImageAnalysis {
-  averageLight: number;
-  shadowsPercent: number;
-  highlightsPercent: number;
-  sampledFrames: number;
-  suggested: ImageSettings;
 }
 
 const defaultImage: ImageSettings = {
@@ -76,6 +60,7 @@ export function InternalPlayer({
   const [showImagePanel, setShowImagePanel] = useState(false);
   const [image, setImage] = useState<ImageSettings>(defaultImage);
   const [analysis, setAnalysis] = useState<ImageAnalysis | null>(null);
+  const [analysisProgress, setAnalysisProgress] = useState<ImageAnalysisProgress | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [nextMovie, setNextMovie] = useState<MediaSummary | null>(null);
   const [nextPromptVisible, setNextPromptVisible] = useState(false);
@@ -92,14 +77,12 @@ export function InternalPlayer({
     const brightness = 1 + image.brightness / 100;
     const contrast = 1 + image.contrast / 100;
     const saturation = 1 + image.saturation / 100;
-    return `brightness(${brightness}) contrast(${contrast}) saturate(${saturation})`;
+    return `url(#cw-tonal-curve) brightness(${brightness}) contrast(${contrast}) saturate(${saturation})`;
   }, [image]);
 
+  const tonalCurve = useMemo(() => tonalCurveTable(image.shadows, image.highlights), [image.shadows, image.highlights]);
+
   const imageOverlay = useMemo(() => ({
-    '--shadow-lift': image.shadows > 0 ? Math.min(image.shadows / 120, 0.42) : 0,
-    '--shadow-crush': image.shadows < 0 ? Math.min(Math.abs(image.shadows) / 140, 0.36) : 0,
-    '--highlight-lift': image.highlights > 0 ? Math.min(image.highlights / 155, 0.34) : 0,
-    '--highlight-recover': image.highlights < 0 ? Math.min(Math.abs(image.highlights) / 180, 0.28) : 0,
     '--temperature-opacity': Math.min(Math.abs(image.temperature) / 120, 0.36),
     '--temperature-color': image.temperature >= 0 ? 'rgba(255,170,85,1)' : 'rgba(95,150,255,1)',
   }) as React.CSSProperties, [image]);
@@ -247,73 +230,67 @@ export function InternalPlayer({
   }, [nextMovie, onPlayNext, saveProgress]);
 
   const analyzeImage = useCallback(async () => {
+    if (analyzing) return;
     const video = videoRef.current;
-    if (!video || analyzing) return;
-    const total = video.duration || duration;
-    if (!total || total < 1) {
-      setError('El video todavía no informó duración para analizar la imagen.');
-      return;
-    }
+    const resumeAt = Number.isFinite(video?.currentTime) ? video!.currentTime : current;
+    const shouldResume = video ? !video.paused : playing;
     setAnalyzing(true);
+    setAnalysisProgress({
+      mediaId: source.detail.id,
+      running: true,
+      processedFrames: 0,
+      totalFrames: 0,
+      sampledFrames: 0,
+      percent: 0,
+    });
     setError(null);
-    const wasPlaying = !video.paused;
-    const originalTime = video.currentTime;
-    video.pause();
-    setPlaying(false);
+    if (video) {
+      video.pause();
+      setPlaying(false);
+      setCurrent(resumeAt);
+    }
     try {
-      const canvas = document.createElement('canvas');
-      canvas.width = 160;
-      canvas.height = 90;
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      if (!ctx) throw new Error('No se pudo preparar el análisis.');
-      const samples = Math.min(48, Math.max(12, Math.round(total / 180) * 8));
-      let lumaTotal = 0;
-      let pixelsTotal = 0;
-      let shadows = 0;
-      let highlights = 0;
-      for (let index = 0; index < samples; index += 1) {
-        const sampleAt = ((index + 0.5) / samples) * Math.max(0.1, total - 0.2);
-        await seekVideo(video, sampleAt);
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-        for (let i = 0; i < data.length; i += 16) {
-          const luma = data[i] * 0.2126 + data[i + 1] * 0.7152 + data[i + 2] * 0.0722;
-          lumaTotal += luma;
-          pixelsTotal += 1;
-          if (luma < 45) shadows += 1;
-          if (luma > 210) highlights += 1;
-        }
-      }
-      const avg = pixelsTotal ? lumaTotal / pixelsTotal : 128;
-      const shadowsPercent = pixelsTotal ? shadows / pixelsTotal * 100 : 0;
-      const highlightsPercent = pixelsTotal ? highlights / pixelsTotal * 100 : 0;
-      const suggested: ImageSettings = {
-        brightness: clamp(Math.round((126 - avg) / 4), -18, 18),
-        contrast: clamp(Math.round(10 - Math.abs(avg - 126) / 18), -4, 14),
-        saturation: 6,
-        shadows: clamp(Math.round(shadowsPercent / 2.4), 0, 26),
-        highlights: clamp(Math.round(-highlightsPercent / 2.6), -24, 0),
-        temperature: 0,
-      };
-      setAnalysis({
-        averageLight: Math.round(avg / 255 * 100),
-        shadowsPercent: Math.round(shadowsPercent),
-        highlightsPercent: Math.round(highlightsPercent),
-        sampledFrames: samples,
-        suggested,
-      });
-      await seekVideo(video, originalTime);
-      if (wasPlaying) {
-        await video.play().catch(() => {});
-        setPlaying(!video.paused);
-      }
+      const result = await invoke<ImageAnalysis>('analyze_media_image', { mediaId: source.detail.id });
+      setAnalysis(result);
     } catch (cause) {
       setError(`No se pudo analizar la imagen: ${String(cause)}`);
-      try { await seekVideo(video, originalTime); } catch { /* noop */ }
     } finally {
       setAnalyzing(false);
+      setAnalysisProgress(null);
+      if (video) {
+        if (Math.abs(video.currentTime - resumeAt) > 0.25) {
+          video.currentTime = resumeAt;
+        }
+        setCurrent(resumeAt);
+        if (shouldResume) {
+          await video.play().catch(() => {});
+          setPlaying(!video.paused);
+        } else {
+          setPlaying(false);
+        }
+      }
     }
-  }, [analyzing, duration]);
+  }, [analyzing, current, playing, source.detail.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let cleanup: (() => void) | null = null;
+    void listen<ImageAnalysisProgress>('image-analysis-progress', event => {
+      const progress = event.payload;
+      if (progress.mediaId !== source.detail.id) return;
+      setAnalysisProgress(progress.running ? progress : null);
+    }).then(unlisten => {
+      if (cancelled) {
+        unlisten();
+      } else {
+        cleanup = unlisten;
+      }
+    });
+    return () => {
+      cancelled = true;
+      if (cleanup) cleanup();
+    };
+  }, [source.detail.id]);
 
   useEffect(() => {
     clearControlsTimer();
@@ -411,6 +388,7 @@ export function InternalPlayer({
     setNextDismissed(false);
     setNextCountdown(NEXT_COUNTDOWN_SECONDS);
     setAnalysis(null);
+    setAnalysisProgress(null);
     setImage(defaultImage);
   }, [source.detail.id, source.detail.runtimeMs, source.detail.technical.durationMs]);
 
@@ -453,7 +431,16 @@ export function InternalPlayer({
   const progress = duration > 0 ? clamp(current / duration, 0, 1) : 0;
 
   return (
-    <div ref={shellRef} className={`cw-player-shell ${controlsVisible ? '' : 'idle'}`}>
+    <div ref={shellRef} className={`cw-player-shell ${controlsVisible ? '' : 'idle'} ${showImagePanel ? 'image-open' : ''}`}>
+      <svg className="cw-filter-defs" aria-hidden="true" focusable="false">
+        <filter id="cw-tonal-curve" colorInterpolationFilters="sRGB">
+          <feComponentTransfer>
+            <feFuncR type="table" tableValues={tonalCurve} />
+            <feFuncG type="table" tableValues={tonalCurve} />
+            <feFuncB type="table" tableValues={tonalCurve} />
+          </feComponentTransfer>
+        </filter>
+      </svg>
       <video
         ref={videoRef}
         className="cw-player-video"
@@ -503,10 +490,6 @@ export function InternalPlayer({
         onError={() => setError('No se pudo reproducir dentro de CINE WANA. Probá Abrir externo para este archivo.')}
       />
       <div className="cw-player-layer" style={imageOverlay}>
-        <span className="shadow-lift" />
-        <span className="shadow-crush" />
-        <span className="highlight-lift" />
-        <span className="highlight-recover" />
         <span className="temperature" />
       </div>
 
@@ -552,12 +535,21 @@ export function InternalPlayer({
           <button className="cw-analyze" onClick={analyzeImage} disabled={analyzing}>
             <Sparkles size={15}/>{analyzing ? 'Analizando escenas…' : 'Escanear video'}
           </button>
+          {analyzing && (
+            <div className="cw-analysis-progress">
+              <div><span>Escaneando escenas</span><b>{Math.round(analysisProgress?.percent ?? 0)}%</b></div>
+              <i><span style={{ width: `${clamp(analysisProgress?.percent ?? 0, 0, 100)}%` }} /></i>
+              <small>{analysisProgress?.totalFrames ? `${analysisProgress.processedFrames}/${analysisProgress.totalFrames} muestras` : 'Preparando muestras'} · video en pausa</small>
+            </div>
+          )}
           {analysis && (
             <div className="cw-analysis">
               <div><span>Luz media</span><b>{analysis.averageLight}%</b></div>
               <div><span>Sombras</span><b>{analysis.shadowsPercent}%</b></div>
               <div><span>Altas luces</span><b>{analysis.highlightsPercent}%</b></div>
-              <small>{analysis.sampledFrames} escenas revisadas.</small>
+              <div><span>Saturacion</span><b>{analysis.averageSaturation}%</b></div>
+              <div><span>Dominante</span><b>{signedNumber(analysis.warmth)}</b></div>
+              <small>{analysis.sampledFrames} escenas revisadas con FFmpeg.</small>
               <button onClick={() => setImage(analysis.suggested)}>Aplicar sugerido</button>
             </div>
           )}
@@ -640,6 +632,46 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
+function tonalCurveTable(shadows: number, highlights: number) {
+  const points = 33;
+  return Array.from({ length: points }, (_, index) => {
+    const input = index / (points - 1);
+    return tonalCurveValue(input, shadows, highlights).toFixed(4);
+  }).join(' ');
+}
+
+function tonalCurveValue(input: number, shadows: number, highlights: number) {
+  let value = input;
+  if (shadows > 0) {
+    const strength = shadows / 50;
+    const influence = 1 - smoothstep(0.1, 0.68, input);
+    value += 0.28 * strength * influence * (1 - input * 0.18);
+  } else if (shadows < 0) {
+    const strength = Math.abs(shadows) / 50;
+    const influence = 1 - smoothstep(0.04, 0.62, input);
+    value -= 0.34 * strength * influence * Math.sqrt(input);
+  }
+  if (highlights > 0) {
+    const strength = highlights / 50;
+    const influence = smoothstep(0.45, 0.96, input);
+    value += 0.18 * strength * influence * (1 - input * 0.28);
+  } else if (highlights < 0) {
+    const strength = Math.abs(highlights) / 50;
+    const influence = smoothstep(0.46, 1, input);
+    value -= 0.24 * strength * influence * input;
+  }
+  return clamp(value, 0, 1);
+}
+
+function smoothstep(edge0: number, edge1: number, value: number) {
+  const t = clamp((value - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+function signedNumber(value: number) {
+  return value > 0 ? `+${value}` : value.toString();
+}
+
 function formatClock(seconds: number) {
   if (!Number.isFinite(seconds) || seconds <= 0) return '0:00';
   const whole = Math.floor(seconds);
@@ -647,29 +679,4 @@ function formatClock(seconds: number) {
   const m = Math.floor((whole % 3600) / 60);
   const s = whole % 60;
   return h > 0 ? `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}` : `${m}:${s.toString().padStart(2, '0')}`;
-}
-
-function seekVideo(video: HTMLVideoElement, seconds: number) {
-  return new Promise<void>((resolve, reject) => {
-    const timeout = window.setTimeout(() => {
-      cleanup();
-      reject(new Error('El video tardó demasiado en buscar una escena.'));
-    }, 3500);
-    const cleanup = () => {
-      window.clearTimeout(timeout);
-      video.removeEventListener('seeked', onSeeked);
-      video.removeEventListener('error', onError);
-    };
-    const onSeeked = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = () => {
-      cleanup();
-      reject(new Error('No se pudo leer una escena del video.'));
-    };
-    video.addEventListener('seeked', onSeeked, { once: true });
-    video.addEventListener('error', onError, { once: true });
-    video.currentTime = seconds;
-  });
 }

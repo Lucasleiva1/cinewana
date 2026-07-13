@@ -1,7 +1,7 @@
 use cinewana_core::{
-    AccountDto, BootstrapDto, CatalogQuery, DEFAULT_LIBRARY_ROOT, MediaDetail,
-    MediaMetadataCandidate, MediaMetadataUpdate, MediaSummary, PlayerCommand, PlayerState,
-    ScanProgress,
+    AccountDto, BootstrapDto, CatalogQuery, DEFAULT_LIBRARY_ROOT, ImageAnalysis,
+    ImageAnalysisProgress, MediaDetail, MediaMetadataCandidate, MediaMetadataUpdate, MediaSummary,
+    PlayerCommand, PlayerState, ScanProgress,
 };
 use cinewana_database::{Database, MetadataImportTarget};
 use cinewana_metadata::{MetadataSearchOutcome, WikipediaMetadataClient};
@@ -244,6 +244,78 @@ fn technical_path(
     state: State<'_, AppServices>,
 ) -> Result<Option<String>, String> {
     state.db.media_path(&media_id).map_err(error_string)
+}
+
+#[tauri::command]
+async fn analyze_media_image(
+    app: AppHandle,
+    media_id: String,
+    state: State<'_, AppServices>,
+) -> Result<ImageAnalysis, String> {
+    let ffmpeg = state
+        .ffmpeg
+        .clone()
+        .ok_or_else(|| "FFmpeg no esta disponible para analizar la imagen".to_string())?;
+    let account_id = state.db.require_active_account_id().map_err(error_string)?;
+    let detail = state
+        .db
+        .media_detail(Some(&account_id), &media_id)
+        .map_err(error_string)?
+        .ok_or_else(|| "No se encontro el medio para analizar".to_string())?;
+    let path = state
+        .db
+        .media_path(&media_id)
+        .map_err(error_string)?
+        .map(PathBuf::from)
+        .ok_or_else(|| "El archivo ya no esta disponible".to_string())?;
+    let duration_ms = detail.runtime_ms.or(detail.summary.technical.duration_ms);
+    let progress_app = app.clone();
+    let progress_media_id = media_id.clone();
+    let result = cinewana_scanner::analyze_image_with_progress(
+        &ffmpeg,
+        &path,
+        duration_ms,
+        move |processed_frames, total_frames, sampled_frames| {
+            let percent = if total_frames == 0 {
+                0.0
+            } else {
+                (processed_frames as f64 / total_frames as f64 * 100.0).clamp(0.0, 100.0)
+            };
+            let _ = progress_app.emit(
+                "image-analysis-progress",
+                ImageAnalysisProgress {
+                    media_id: progress_media_id.clone(),
+                    running: true,
+                    processed_frames,
+                    total_frames,
+                    sampled_frames,
+                    percent,
+                },
+            );
+        },
+    )
+    .await;
+    let _ = app.emit(
+        "image-analysis-progress",
+        ImageAnalysisProgress {
+            media_id,
+            running: false,
+            processed_frames: result
+                .as_ref()
+                .map(|analysis| analysis.sampled_frames)
+                .unwrap_or_default(),
+            total_frames: result
+                .as_ref()
+                .map(|analysis| analysis.sampled_frames)
+                .unwrap_or_default(),
+            sampled_frames: result
+                .as_ref()
+                .map(|analysis| analysis.sampled_frames)
+                .unwrap_or_default(),
+            percent: if result.is_ok() { 100.0 } else { 0.0 },
+        },
+    );
+    result.map_err(error_string)
 }
 
 #[tauri::command]
@@ -660,6 +732,7 @@ pub fn run() {
             cancel_scan,
             replace_library_root,
             technical_path,
+            analyze_media_image,
             player_state,
             player_command
         ])

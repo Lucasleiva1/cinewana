@@ -28,7 +28,11 @@
 - Internal playback saves watch progress through the existing `watch_progress` database path for continue/resume behavior
 - Added playback-only controls: play/pause, seek, restart, volume, mute, fullscreen, and close
 - Added non-destructive image scanning and runtime adjustments for brightness, contrast, saturation, shadows, highlights, and temperature
+- Moved internal-player image scanning to Rust/FFmpeg so scene, light, and color analysis works with local Tauri media URLs without browser canvas security errors
+- Image scanning now pauses playback, reports live scan progress, and resumes from the original playback position when finished
+- Reworked shadows/highlights adjustment as a tonal curve so shadow correction no longer washes the whole frame white
 - Added automatic numbered movie-sequel handoff for local sagas, with a cancellable next-up prompt near the end of playback
+- Prepared version 0.2.0 as an important signed updater release for the internal-player image correction workflow
 
 ## Implemented for local account profiles
 
