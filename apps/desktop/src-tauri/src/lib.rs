@@ -137,6 +137,18 @@ fn next_movie(
 }
 
 #[tauri::command]
+fn next_up(
+    media_id: String,
+    state: State<'_, AppServices>,
+) -> Result<Option<MediaSummary>, String> {
+    let account_id = state.db.require_active_account_id().map_err(error_string)?;
+    state
+        .db
+        .next_up(Some(&account_id), &media_id)
+        .map_err(error_string)
+}
+
+#[tauri::command]
 fn update_media_metadata(
     media_id: String,
     metadata: MediaMetadataUpdate,
@@ -923,6 +935,7 @@ pub fn run() {
             media_detail,
             resolve_identification,
             next_movie,
+            next_up,
             update_media_metadata,
             refresh_media_metadata,
             apply_metadata_candidate,

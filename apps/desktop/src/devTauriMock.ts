@@ -118,6 +118,11 @@ export function installDevTauriMock() {
         const item = catalog.find(value => value.id === id);
         return item ? detailFor(item) : null;
       }
+      case 'next_up': {
+        const mediaId = (args as { mediaId?: string }).mediaId;
+        const currentIndex = catalog.findIndex(value => value.id === mediaId);
+        return currentIndex >= 0 ? catalog[currentIndex + 1] ?? null : null;
+      }
       case 'technical_path':
         return 'D:\\peliculas-y-series\\sample.mp4';
       case 'rescan_media_item':

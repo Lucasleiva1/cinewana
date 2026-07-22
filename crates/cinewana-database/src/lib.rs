@@ -1095,6 +1095,69 @@ impl Database {
         Ok(candidates.into_iter().next())
     }
 
+    pub fn next_up(&self, account_id: Option<&str>, id: &str) -> Result<Option<MediaSummary>> {
+        let account_id = account_id.unwrap_or("");
+        let conn = self.connection.lock();
+        let source = conn
+            .query_row(MEDIA_SELECT_BY_ID, params![account_id, id], row_to_summary)
+            .optional()?;
+        let Some(source) = source else {
+            return Ok(None);
+        };
+
+        match source.kind {
+            MediaKind::Episode => {
+                let Some(series_title) = source.series_title.as_deref() else {
+                    return Ok(None);
+                };
+                let (Some(source_season), Some(source_episode)) =
+                    (source.season_number, source.episode_number)
+                else {
+                    return Ok(None);
+                };
+                let mut statement = conn.prepare(MEDIA_SELECT)?;
+                let mut episodes = statement
+                    .query_map([account_id], row_to_summary)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                    .into_iter()
+                    .filter(|item| item.kind == MediaKind::Episode && item.id != source.id)
+                    .filter(|item| {
+                        item.series_title
+                            .as_deref()
+                            .is_some_and(|title| title.eq_ignore_ascii_case(series_title))
+                    })
+                    .filter(|item| {
+                        item.season_number
+                            .zip(item.episode_number)
+                            .is_some_and(|position| position > (source_season, source_episode))
+                    })
+                    .collect::<Vec<_>>();
+                episodes.sort_by(|a, b| {
+                    a.season_number
+                        .cmp(&b.season_number)
+                        .then_with(|| a.episode_number.cmp(&b.episode_number))
+                        .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+                });
+                Ok(episodes.into_iter().next())
+            }
+            MediaKind::Movie => {
+                let genres_json: String = conn.query_row(
+                    "SELECT genres_json FROM media_items WHERE id=?1",
+                    [id],
+                    |row| row.get(0),
+                )?;
+                let genres = normalize_tags(serde_json::from_str(&genres_json).unwrap_or_default(), 12);
+                Ok(ranked_recommendations_locked(&conn, account_id, id, &genres, &source)?
+                    .into_iter()
+                    .find(|item| {
+                        item.kind == MediaKind::Movie
+                            && !item.completed
+                            && item.progress_percent <= f64::EPSILON
+                    }))
+            }
+        }
+    }
+
     pub fn update_media_metadata(
         &self,
         media_id: &str,
@@ -1364,6 +1427,25 @@ fn recommendations_locked(
     source_genres: &[String],
     source: &MediaSummary,
 ) -> Result<Vec<MediaSummary>> {
+    Ok(ranked_recommendations_locked(
+        conn,
+        account_id,
+        media_id,
+        source_genres,
+        source,
+    )?
+    .into_iter()
+    .take(12)
+    .collect())
+}
+
+fn ranked_recommendations_locked(
+    conn: &Connection,
+    account_id: &str,
+    media_id: &str,
+    source_genres: &[String],
+    source: &MediaSummary,
+) -> Result<Vec<MediaSummary>> {
     let mut genres_stmt = conn.prepare("SELECT id,genres_json FROM media_items")?;
     let genre_rows = genres_stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
@@ -1422,7 +1504,7 @@ fn recommendations_locked(
                 .cmp(&item_b.title.to_lowercase())
         })
     });
-    Ok(scored.into_iter().take(12).map(|(_, item)| item).collect())
+    Ok(scored.into_iter().map(|(_, item)| item).collect())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2004,6 +2086,103 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn next_up_advances_episodes_and_crosses_seasons() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        for (path, fingerprint) in [
+            (r"D:\media\My.Show.S01E01.mkv", "10:1"),
+            (r"D:\media\My.Show.S01E02.mkv", "11:1"),
+            (r"D:\media\My.Show.S02E01.mkv", "12:1"),
+            (r"D:\media\Other.Show.S01E02.mkv", "13:1"),
+        ] {
+            db.upsert_file(&root, "scan-1", &discovered_file(path, fingerprint))
+                .unwrap();
+        }
+        db.finish_scan(&root, "scan-1", "completed", 4, 4, 0, 0)
+            .unwrap();
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        let catalog = db
+            .catalog(Some(&account.id), &CatalogQuery::default())
+            .unwrap();
+        let episode = |season, number| {
+            catalog
+                .iter()
+                .find(|item| {
+                    item.series_title.as_deref() == Some("My Show")
+                        && item.season_number == Some(season)
+                        && item.episode_number == Some(number)
+                })
+                .unwrap()
+        };
+
+        let second = db
+            .next_up(Some(&account.id), &episode(1, 1).id)
+            .unwrap()
+            .unwrap();
+        assert_eq!((second.season_number, second.episode_number), (Some(1), Some(2)));
+
+        let next_season = db
+            .next_up(Some(&account.id), &second.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (next_season.season_number, next_season.episode_number),
+            (Some(2), Some(1))
+        );
+        assert!(db
+            .next_up(Some(&account.id), &next_season.id)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn next_up_recommends_a_similar_unwatched_movie() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        for (path, fingerprint) in [
+            (r"D:\media\Source.Movie.2022.mkv", "10:1"),
+            (r"D:\media\Watched.Match.2021.mkv", "11:1"),
+            (r"D:\media\Unwatched.Match.2020.mkv", "12:1"),
+            (r"D:\media\Unrelated.Movie.2022.mkv", "13:1"),
+        ] {
+            db.upsert_file(&root, "scan-1", &discovered_file(path, fingerprint))
+                .unwrap();
+        }
+        db.finish_scan(&root, "scan-1", "completed", 4, 4, 0, 0)
+            .unwrap();
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        let catalog = db
+            .catalog(Some(&account.id), &CatalogQuery::default())
+            .unwrap();
+        let id = |title: &str| catalog.iter().find(|item| item.title == title).unwrap().id.clone();
+        let source_id = id("Source Movie");
+        let watched_id = id("Watched Match");
+        let unwatched_match_id = id("Unwatched Match");
+        let genre_json = serde_json::to_string(&vec!["Terror"]).unwrap();
+        for media_id in [&source_id, &watched_id, &unwatched_match_id] {
+            db.connection
+                .lock()
+                .execute(
+                    "UPDATE media_items SET genres_json=?1 WHERE id=?2",
+                    params![genre_json, media_id],
+                )
+                .unwrap();
+        }
+        db.save_progress(&account.id, &watched_id, 100, 100)
+            .unwrap();
+
+        let recommendation = db
+            .next_up(Some(&account.id), &source_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recommendation.id, unwatched_match_id);
+        assert_eq!(recommendation.progress_percent, 0.0);
+        assert!(!recommendation.completed);
     }
 
     #[test]

@@ -7,6 +7,7 @@ import {
   SlidersHorizontal, Sparkles, Volume2, VolumeX, X
 } from 'lucide-react';
 import type { ImageAnalysis, ImageAnalysisProgress, ImageSettings, MediaDetail, MediaSummary, RemoteCommand, RemotePlayerSnapshot } from './types';
+import { NEXT_UP_LEAD_SECONDS, nextUpSecondsRemaining, shouldAutoplayNextUp, shouldOfferNextUp } from './playerNextUp';
 
 export interface InternalPlayerSource {
   detail: MediaDetail;
@@ -24,8 +25,6 @@ const defaultImage: ImageSettings = {
   temperature: 0,
 };
 
-const NEXT_CREDITS_LEAD_SECONDS = 30;
-const NEXT_COUNTDOWN_SECONDS = 8;
 const CONTROLS_HIDE_DELAY_MS = 2600;
 
 export function InternalPlayer({
@@ -49,7 +48,7 @@ export function InternalPlayer({
   const lastPointerRef = useRef({ x: 0, y: 0, ready: false });
   const initialWindowFullscreenRef = useRef<boolean | null>(null);
   const restoredRef = useRef(false);
-  const nextStartedAtRef = useRef<number | null>(null);
+  const nextStartingRef = useRef(false);
   const [playing, setPlaying] = useState(true);
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(() => msToSeconds(source.detail.runtimeMs ?? source.detail.technical.durationMs ?? 0));
@@ -62,16 +61,20 @@ export function InternalPlayer({
   const [analysis, setAnalysis] = useState<ImageAnalysis | null>(null);
   const [analysisProgress, setAnalysisProgress] = useState<ImageAnalysisProgress | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
-  const [nextMovie, setNextMovie] = useState<MediaSummary | null>(null);
+  const [nextUp, setNextUp] = useState<MediaSummary | null>(null);
   const [nextPromptVisible, setNextPromptVisible] = useState(false);
   const [nextDismissed, setNextDismissed] = useState(false);
-  const [nextCountdown, setNextCountdown] = useState(NEXT_COUNTDOWN_SECONDS);
   const [error, setError] = useState<string | null>(null);
 
   const title = displayTitle(source.detail);
   const resumeSeconds = msToSeconds(source.resumeMs);
   const canResume = resumeSeconds > 20 && !source.detail.completed;
-  const nextProgress = clamp((NEXT_COUNTDOWN_SECONDS - nextCountdown) / NEXT_COUNTDOWN_SECONDS, 0, 1);
+  const nextCountdown = nextUpSecondsRemaining(current, duration);
+  const nextProgress = clamp((NEXT_UP_LEAD_SECONDS - nextCountdown) / NEXT_UP_LEAD_SECONDS, 0, 1);
+  const nextLabel = source.detail.kind === 'episode' ? 'Siguiente episodio' : 'Película recomendada';
+  const nextPosition = nextUp?.kind === 'episode'
+    ? `T${nextUp.seasonNumber ?? '?'} E${nextUp.episodeNumber ?? '?'}`
+    : nextUp?.year?.toString();
 
   const imageFilter = useMemo(() => {
     const brightness = 1 + image.brightness / 100;
@@ -272,29 +275,29 @@ export function InternalPlayer({
   }, [onOpenExternal, restoreWindowFullscreenMode, saveProgress, source.detail.id]);
 
   const beginNextPrompt = useCallback(() => {
-    if (!nextMovie || nextDismissed || nextPromptVisible) return;
-    nextStartedAtRef.current = Date.now();
-    setNextCountdown(NEXT_COUNTDOWN_SECONDS);
+    if (!nextUp || nextDismissed || nextPromptVisible) return;
     setNextPromptVisible(true);
     setControlsVisible(true);
-  }, [nextDismissed, nextMovie, nextPromptVisible]);
+  }, [nextDismissed, nextPromptVisible, nextUp]);
 
   const cancelNextPrompt = useCallback(() => {
-    nextStartedAtRef.current = null;
     setNextPromptVisible(false);
     setNextDismissed(true);
-    setNextCountdown(NEXT_COUNTDOWN_SECONDS);
     void saveProgress(true);
   }, [saveProgress]);
 
-  const startNextMovie = useCallback(async () => {
-    if (!nextMovie) return;
-    nextStartedAtRef.current = null;
+  const startNextUp = useCallback(async () => {
+    if (!nextUp || nextStartingRef.current) return;
+    nextStartingRef.current = true;
     setNextPromptVisible(false);
     setNextDismissed(true);
-    await saveProgress(true);
-    await onPlayNext(nextMovie.id);
-  }, [nextMovie, onPlayNext, saveProgress]);
+    try {
+      await saveProgress(true);
+      await onPlayNext(nextUp.id);
+    } finally {
+      nextStartingRef.current = false;
+    }
+  }, [nextUp, onPlayNext, saveProgress]);
 
   const analyzeImage = useCallback(async () => {
     if (analyzing) return;
@@ -445,15 +448,14 @@ export function InternalPlayer({
   useEffect(() => {
     restoredRef.current = false;
     lastSavedAtRef.current = 0;
-    nextStartedAtRef.current = null;
+    nextStartingRef.current = false;
     setPlaying(true);
     setCurrent(0);
     setDuration(msToSeconds(source.detail.runtimeMs ?? source.detail.technical.durationMs ?? 0));
     setError(null);
-    setNextMovie(null);
+    setNextUp(null);
     setNextPromptVisible(false);
     setNextDismissed(false);
-    setNextCountdown(NEXT_COUNTDOWN_SECONDS);
     setAnalysis(null);
     setAnalysisProgress(null);
     setImage(defaultImage);
@@ -461,39 +463,23 @@ export function InternalPlayer({
 
   useEffect(() => {
     let cancelled = false;
-    if (source.detail.kind !== 'movie') {
-      setNextMovie(null);
-      return () => { cancelled = true; };
-    }
-    invoke<MediaSummary | null>('next_movie', { mediaId: source.detail.id })
+    invoke<MediaSummary | null>('next_up', { mediaId: source.detail.id })
       .then(next => {
-        if (!cancelled) setNextMovie(next);
+        if (!cancelled) setNextUp(next);
       })
       .catch(() => {
-        if (!cancelled) setNextMovie(null);
+        if (!cancelled) setNextUp(null);
       });
     return () => { cancelled = true; };
-  }, [source.detail.id, source.detail.kind]);
+  }, [source.detail.id]);
 
   useEffect(() => {
-    if (!nextMovie || nextDismissed || nextPromptVisible || duration <= 0) return;
-    if (duration < NEXT_CREDITS_LEAD_SECONDS + NEXT_COUNTDOWN_SECONDS + 8) return;
-    if (duration - current <= NEXT_CREDITS_LEAD_SECONDS) beginNextPrompt();
-  }, [beginNextPrompt, current, duration, nextDismissed, nextMovie, nextPromptVisible]);
-
-  useEffect(() => {
-    if (!nextPromptVisible || !nextMovie) return;
-    const timer = window.setInterval(() => {
-      const startedAt = nextStartedAtRef.current ?? Date.now();
-      const remaining = Math.max(0, NEXT_COUNTDOWN_SECONDS - (Date.now() - startedAt) / 1000);
-      setNextCountdown(remaining);
-      if (remaining <= 0) {
-        window.clearInterval(timer);
-        void startNextMovie();
-      }
-    }, 120);
-    return () => window.clearInterval(timer);
-  }, [nextMovie, nextPromptVisible, startNextMovie]);
+    if (shouldOfferNextUp(current, duration, Boolean(nextUp), nextDismissed) && !nextPromptVisible) {
+      beginNextPrompt();
+    } else if (nextUpSecondsRemaining(current, duration) > NEXT_UP_LEAD_SECONDS && nextPromptVisible) {
+      setNextPromptVisible(false);
+    }
+  }, [beginNextPrompt, current, duration, nextDismissed, nextPromptVisible, nextUp]);
 
   const progress = duration > 0 ? clamp(current / duration, 0, 1) : 0;
 
@@ -548,8 +534,8 @@ export function InternalPlayer({
         }}
         onEnded={() => {
           setPlaying(false);
-          if (nextMovie && !nextDismissed) {
-            beginNextPrompt();
+          if (shouldAutoplayNextUp(Boolean(nextUp), nextDismissed)) {
+            void startNextUp();
           } else {
             void saveProgress(true);
           }
@@ -562,19 +548,26 @@ export function InternalPlayer({
 
       {error && <div className="cw-player-error"><span>{error}</span><button onClick={() => setError(null)}><X size={16}/></button></div>}
 
-      {nextMovie && nextPromptVisible && (
+      {nextUp && nextPromptVisible && (
         <aside className="cw-next-up" onClick={event => event.stopPropagation()}>
           <div className="cw-next-poster">
-            {nextMovie.artworkUrl ? <img src={convertFileSrc(nextMovie.artworkUrl)} alt="" /> : <span>{initials(nextMovie.title)}</span>}
+            {nextUp.artworkUrl ? <img src={convertFileSrc(nextUp.artworkUrl)} alt="" /> : <span>{initials(nextUp.title)}</span>}
           </div>
           <div className="cw-next-copy">
-            <small>Siguiente parte</small>
-            <b>{nextMovie.title}</b>
-            <span>Empieza en {Math.ceil(nextCountdown)} s</span>
+            <small>{nextLabel}</small>
+            <b>{nextUp.title}</b>
+            <span>{nextPosition ? `${nextPosition} · ` : ''}Empieza al terminar · {Math.ceil(nextCountdown)} s</span>
             <div className="cw-next-meter"><i style={{ width: `${nextProgress * 100}%` }} /></div>
           </div>
           <button onClick={cancelNextPrompt}>Cancelar</button>
         </aside>
+      )}
+
+      {nextUp && nextDismissed && !nextPromptVisible && (
+        <button className="cw-next-manual" onClick={event => { event.stopPropagation(); void startNextUp(); }} onDoubleClick={event => event.stopPropagation()}>
+          <SkipForward size={18}/>
+          <span><small>{nextLabel}</small><b>{nextUp.title}</b></span>
+        </button>
       )}
 
       <div className="cw-player-top">

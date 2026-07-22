@@ -32,6 +32,8 @@
 - Image scanning now pauses playback, reports live scan progress, and resumes from the original playback position when finished
 - Reworked shadows/highlights adjustment as a tonal curve so shadow correction no longer washes the whole frame white
 - Added automatic numbered movie-sequel handoff for local sagas, with a cancellable next-up prompt near the end of playback
+- Replaced the early eight-second handoff with a real 30-second end-of-video countdown: cancelling stops autoplay but keeps a working manual next button
+- Series now advance to the next numbered episode across seasons, while movies recommend a genre/year-related title with no progress in the active account
 - Prepared version 0.2.0 as an important signed updater release for the internal-player image correction workflow
 
 ## Implemented for local account profiles
@@ -96,6 +98,7 @@
 - Prepared version 0.2.1 as the installable Windows x64 test update that exposes **Configuración → Control remoto** in the desktop application
 - Prepared version 0.3.0-rc.1 as the important pre-final updater release for resilient series identification, targeted rescans, daily discovery rotation, and the local remote-control PWA
 - Prepared version 0.3.1 as the signed pre-final updater release that makes `SERIES` and `PELÍCULAS` explicit, mandatory classification containers
+- Prepared version 0.3.2 as the signed pre-final updater release for cancellable next-episode and unwatched-movie handoff
 - Windows-hosted HTTP/WebSocket service for same-Wi-Fi control
 - QR and manual-URL pairing with approved, revocable device tokens
 - Mobile web remote for the internal player and existing library actions
