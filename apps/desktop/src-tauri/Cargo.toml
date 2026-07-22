@@ -14,14 +14,20 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 anyhow.workspace = true
+axum = { version = "0.8.4", features = ["ws"] }
+base64 = "0.22.1"
+chrono.workspace = true
 cinewana-core = { path = "../../../crates/cinewana-core" }
 cinewana-database = { path = "../../../crates/cinewana-database" }
 cinewana-metadata = { path = "../../../crates/cinewana-metadata" }
 cinewana-player = { path = "../../../crates/cinewana-player" }
 cinewana-scanner = { path = "../../../crates/cinewana-scanner" }
+futures-util = "0.3.31"
 parking_lot.workspace = true
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tauri = { version = "2", features = ["protocol-asset", "unstable"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"

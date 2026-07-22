@@ -367,3 +367,59 @@ button, input, textarea { min-width:0; }
   .cw-player-shell.image-open .cw-image-panel { padding:10px; }
   .cw-player-shell.image-open .cw-analysis { grid-template-columns:repeat(2,1fr); }
 }
+
+.series-detail-modal { width:min(900px,92vw); max-height:88vh; overflow:auto; position:relative; border:1px solid #ffffff16; border-radius:12px; background:#141414; box-shadow:0 30px 100px #000; padding:34px; }
+.series-detail-modal header { padding:10px 12px 28px; border-bottom:1px solid #ffffff10; }
+.series-detail-modal header h1 { margin:8px 0; font-family:Oswald,sans-serif; font-size:38px; text-transform:uppercase; }
+.series-detail-modal header p { color:#888; font-size:11px; }
+.series-seasons { display:grid; gap:26px; padding:28px 12px 8px; }
+.series-season-title { display:flex; align-items:center; justify-content:space-between; margin-bottom:11px; }
+.series-season-title h2 { font-family:Oswald,sans-serif; text-transform:uppercase; font-size:18px; }
+.series-season-title span { color:#777; font-size:10px; }
+.episode-list { display:grid; gap:7px; }
+.episode-list article { min-height:126px; display:grid; grid-template-columns:190px minmax(0,1fr) auto; align-items:center; gap:16px; border:1px solid #ffffff0d; border-radius:8px; background:#ffffff04; padding:10px; }
+.episode-thumbnail { width:190px; aspect-ratio:16/9; position:relative; overflow:hidden; display:grid; place-items:center; border:0; border-radius:6px; background:linear-gradient(135deg,#3a2024,#111); color:#ffffff28; cursor:pointer; padding:0; }
+.episode-thumbnail img { width:100%; height:100%; object-fit:cover; }
+.episode-thumbnail>span { font-family:Oswald,sans-serif; font-size:26px; }
+.episode-thumbnail i { position:absolute; inset:0; display:grid; place-items:center; background:#0003; color:white; opacity:0; transition:.2s opacity; }
+.episode-thumbnail i svg { width:38px; height:38px; padding:10px; border-radius:50%; background:#b11226e8; }
+.episode-thumbnail:hover i,.episode-thumbnail:focus-visible i { opacity:1; }
+.episode-copy { min-width:0; display:flex; flex-direction:column; gap:7px; }
+.episode-copy>button { width:max-content; max-width:100%; display:flex; align-items:baseline; gap:8px; border:0; background:transparent; color:inherit; cursor:pointer; padding:0; text-align:left; }
+.episode-copy b { font-size:12px; white-space:nowrap; }
+.episode-copy span { color:#aaa; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.episode-copy>p { max-width:560px; color:#777; font-size:10px; line-height:1.5; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.episode-copy>div { display:flex; gap:7px; }
+.episode-copy>div button { min-height:29px; display:flex; align-items:center; gap:5px; border:1px solid #ffffff14; border-radius:4px; background:#ffffff05; color:#aaa; padding:0 9px; font-size:9px; cursor:pointer; }
+.episode-copy>div button:hover { color:white; border-color:#ffffff30; }
+.episode-copy>div .episode-action-play { border-color:#b1122677; background:#b112261b; color:#ed9da7; }
+.episode-copy>div svg { width:12px; }
+.episode-progress { color:var(--gold); font-size:10px; }
+.identification-settings { padding-top:0; padding-bottom:0; }
+.identification-empty { margin-top:18px; min-height:52px; display:flex; align-items:center; gap:9px; color:#70b789; font-size:11px; border-top:1px solid #ffffff0b; }
+.identification-empty svg { width:16px; }
+.identification-review-list { display:grid; gap:12px; margin-top:20px; }
+.identification-review-card { border:1px solid #c8a46a30; background:#0f0f0f; border-radius:8px; padding:16px; }
+.identification-warning { display:flex; align-items:flex-start; gap:10px; margin-bottom:14px; }
+.identification-warning>svg { color:#d0a86c; width:18px; flex:0 0 auto; }
+.identification-warning div { min-width:0; display:flex; flex-direction:column; gap:4px; }
+.identification-warning b { font-size:11px; word-break:break-word; }
+.identification-warning span { color:#a58d69; font-size:10px; }
+.identification-warning small { color:#d77884; font-size:9px; }
+.identification-file-actions { margin-left:auto; flex:0 0 auto; display:flex; gap:7px; }
+.identification-file-actions button { min-height:32px; display:flex; align-items:center; gap:6px; border:1px solid #c8a46a42; border-radius:5px; background:#c8a46a0c; color:#ddc59f; padding:0 10px; font-size:9px; cursor:pointer; }
+.identification-file-actions button:last-child { border-color:#b1122658; background:#b1122610; color:#eea2ac; }
+.identification-file-actions button:disabled { opacity:.55; }
+.identification-file-actions button svg { width:14px; }
+.identification-kind { display:flex; gap:7px; margin-bottom:12px; }
+.identification-kind button { border:1px solid #ffffff13; border-radius:5px; background:#ffffff05; color:#888; padding:8px 11px; font-size:10px; cursor:pointer; }
+.identification-kind button.selected { border-color:#c8a46a66; color:#e1c79f; background:#c8a46a12; }
+.identification-fields { display:grid; grid-template-columns:minmax(180px,2fr) minmax(180px,2fr) 100px 100px; gap:9px; }
+.identification-fields label { display:flex; flex-direction:column; gap:5px; }
+.identification-fields label span { color:#777; font-size:9px; text-transform:uppercase; }
+.identification-fields input { height:34px; min-width:0; border:1px solid #ffffff12; border-radius:5px; background:#171717; color:#eee; padding:0 9px; font-size:10px; outline:none; }
+.identification-fields input:focus { border-color:#c8a46a66; }
+.identification-save { min-height:35px; margin-top:13px; border:0; border-radius:5px; padding:0 12px; display:flex; align-items:center; gap:7px; font-size:10px; cursor:pointer; }
+.identification-save svg { width:14px; }
+
+@media(max-width:800px){.identification-fields{grid-template-columns:1fr 1fr}.identification-warning{flex-wrap:wrap}.identification-file-actions{width:100%;margin-left:28px}.series-detail-modal{padding:24px}.series-detail-modal header h1{font-size:30px}.episode-list article{grid-template-columns:145px minmax(0,1fr)}.episode-thumbnail{width:145px}.episode-progress{display:none}}

@@ -67,6 +67,7 @@ pub struct MediaSummary {
     pub series_title: Option<String>,
     pub season_number: Option<i32>,
     pub episode_number: Option<i32>,
+    pub overview: Option<String>,
     pub progress_percent: f64,
     pub favorite: bool,
     pub in_watchlist: bool,
@@ -207,6 +208,38 @@ pub struct SeriesSummary {
     pub episodes: u32,
     pub artwork_url: Option<String>,
     pub latest_added_at: String,
+    pub season_items: Vec<SeriesSeasonSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeriesSeasonSummary {
+    pub season_number: i32,
+    pub title: String,
+    pub episodes: Vec<MediaSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentificationReview {
+    pub media_id: String,
+    pub file_name: String,
+    pub kind: MediaKind,
+    pub title: String,
+    pub series_title: Option<String>,
+    pub season_number: Option<i32>,
+    pub episode_number: Option<i32>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassificationUpdate {
+    pub kind: MediaKind,
+    pub title: String,
+    pub series_title: Option<String>,
+    pub season_number: Option<i32>,
+    pub episode_number: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,6 +252,7 @@ pub struct BootstrapDto {
     pub active_account: Option<AccountDto>,
     pub ffprobe_available: bool,
     pub player_available: bool,
+    pub identification_reviews: Vec<IdentificationReview>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -336,6 +370,9 @@ pub struct ParsedMediaName {
     pub series_title: Option<String>,
     pub season_number: Option<i32>,
     pub episode_number: Option<i32>,
+    pub identification_source: String,
+    pub needs_review: bool,
+    pub review_reason: Option<String>,
 }
 
 pub fn is_supported_video(path: &Path) -> bool {
@@ -351,26 +388,77 @@ pub fn parse_media_name(path: &Path) -> ParsedMediaName {
         .and_then(|s| s.to_str())
         .unwrap_or_default();
     let normalized = stem.replace(['.', '_'], " ");
-    let episode_re = Regex::new(r"(?i)^(?P<series>.*?)[\s.-]*(?:S(?P<s>\d{1,2})E(?P<e>\d{1,3})|(?P<s2>\d{1,2})x(?P<e2>\d{1,3}))(?:\b|[\s._-])").unwrap();
+    let folder_context = infer_series_folder_context(path);
+    let episode_re = Regex::new(
+        r"(?i)^(?P<series>.*?)[\s.-]*(?:S(?P<s>\d{1,2})E(?P<e>\d{1,3})|(?P<s2>\d{1,2})x(?P<e2>\d{1,3})|(?:temporada|season)\s*0?(?P<s3>\d{1,2})[\s.-]*(?:episodio|episode|ep|cap(?:itulo|.tulo)?|chapter)\s*0?(?P<e3>\d{1,3}))(?:\b|[\s._-])",
+    )
+    .unwrap();
     if let Some(caps) = episode_re.captures(&normalized) {
-        let series = clean_title(caps.name("series").map(|m| m.as_str()).unwrap_or_default());
-        let season = caps
+        let parsed_series =
+            clean_title(caps.name("series").map(|m| m.as_str()).unwrap_or_default());
+        let parsed_season = caps
             .name("s")
             .or_else(|| caps.name("s2"))
+            .or_else(|| caps.name("s3"))
             .and_then(|m| m.as_str().parse().ok());
         let episode = caps
             .name("e")
             .or_else(|| caps.name("e2"))
+            .or_else(|| caps.name("e3"))
             .and_then(|m| m.as_str().parse().ok());
-        let year = extract_year(&normalized);
+        let matched = caps.get(0).expect("episode capture has a full match");
+        let folder_conflicts = folder_context.as_ref().is_some_and(|context| {
+            (!parsed_series.starts_with("Sin t")
+                && !context.series_title.eq_ignore_ascii_case(&parsed_series))
+                || parsed_season.is_some_and(|season| season != context.season_number)
+        });
+        let missing_series = parsed_series.starts_with("Sin t") && folder_context.is_none();
+        let (series, season, source) = folder_context
+            .as_ref()
+            .map(|context| {
+                (
+                    context.series_title.clone(),
+                    Some(context.season_number),
+                    "folder_and_filename".to_string(),
+                )
+            })
+            .unwrap_or((parsed_series, parsed_season, "filename".to_string()));
         return ParsedMediaName {
             kind: MediaKind::Episode,
-            title: format!("Episodio {}", episode.unwrap_or_default()),
-            year,
-            series_title: Some(series.clone()),
+            title: episode_title(&normalized[matched.end()..], episode),
+            year: extract_year(&normalized),
+            series_title: Some(series),
             season_number: season,
             episode_number: episode,
+            identification_source: source,
+            needs_review: folder_conflicts || missing_series,
+            review_reason: if folder_conflicts {
+                Some(
+                    "La carpeta y el archivo identifican la serie o temporada de forma distinta"
+                        .into(),
+                )
+            } else if missing_series {
+                Some("Se detecto el episodio, pero no el nombre de la serie".into())
+            } else {
+                None
+            },
         };
+    }
+
+    if let Some(context) = folder_context.as_ref() {
+        if let Some((episode, marker_end)) = extract_episode_number(&normalized) {
+            return ParsedMediaName {
+                kind: MediaKind::Episode,
+                title: episode_title(&normalized[marker_end..], Some(episode)),
+                year: extract_year(&normalized),
+                series_title: Some(context.series_title.clone()),
+                season_number: Some(context.season_number),
+                episode_number: Some(episode),
+                identification_source: "folder_and_filename".into(),
+                needs_review: false,
+                review_reason: None,
+            };
+        }
     }
     let year = extract_year(&normalized);
     let before_year = if let Some(year) = year {
@@ -388,7 +476,91 @@ pub fn parse_media_name(path: &Path) -> ParsedMediaName {
         series_title: None,
         season_number: None,
         episode_number: None,
+        identification_source: if folder_context.is_some() {
+            "folder".into()
+        } else {
+            "filename".into()
+        },
+        needs_review: folder_context.is_some(),
+        review_reason: folder_context.map(|_| {
+            "La carpeta parece una temporada, pero no se encontro el numero de episodio".into()
+        }),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeriesFolderContext {
+    series_title: String,
+    season_number: i32,
+}
+
+fn infer_series_folder_context(path: &Path) -> Option<SeriesFolderContext> {
+    let season_re = Regex::new(
+        r"(?i)^(?P<series>.*?)(?:[\s._-]*(?:temporada|season)\s*0?(?P<s>\d{1,2})|[\s._-]+S\s*0?(?P<s2>\d{1,2}))(?:\b|[\s._-])",
+    )
+    .unwrap();
+
+    for folder in path.ancestors().skip(1).take(3) {
+        let folder_name = folder.file_name().and_then(|value| value.to_str())?;
+        let normalized = folder_name.replace(['.', '_'], " ");
+        let Some(caps) = season_re.captures(&normalized) else {
+            continue;
+        };
+        let season_number = caps
+            .name("s")
+            .or_else(|| caps.name("s2"))
+            .and_then(|value| value.as_str().parse().ok())?;
+        let embedded_series = caps
+            .name("series")
+            .map(|value| clean_context_title(value.as_str()))
+            .filter(|value| !value.starts_with("Sin t"));
+        let series_title = embedded_series.or_else(|| {
+            folder
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|value| value.to_str())
+                .map(clean_context_title)
+                .filter(|value| !value.starts_with("Sin t"))
+        })?;
+        return Some(SeriesFolderContext {
+            series_title,
+            season_number,
+        });
+    }
+    None
+}
+
+fn extract_episode_number(value: &str) -> Option<(i32, usize)> {
+    let common_labelled = Regex::new(
+        r"(?i)^\s*(?:episodio|episode|ep|e|cap(?:itulo|.tulo)?|chapter)\s*0?(?P<e>\d{1,3})(?:\b|[\s._-])",
+    )
+    .unwrap();
+    if let Some(caps) = common_labelled.captures(value) {
+        return Some((caps.name("e")?.as_str().parse().ok()?, caps.get(0)?.end()));
+    }
+    let leading = Regex::new(r"^\s*0?(?P<e>\d{1,3})(?:\b|[\s._-])").unwrap();
+    let caps = leading.captures(value)?;
+    Some((caps.name("e")?.as_str().parse().ok()?, caps.get(0)?.end()))
+}
+
+fn episode_title(tail: &str, episode: Option<i32>) -> String {
+    let year = extract_year(tail);
+    let before_year = year
+        .and_then(|year| tail.split(&year.to_string()).next())
+        .unwrap_or(tail);
+    let title = clean_title(before_year);
+    if title.starts_with("Sin t") {
+        return format!("Episodio {}", episode.unwrap_or_default());
+    }
+    title
+}
+
+fn clean_context_title(value: &str) -> String {
+    let year = extract_year(value);
+    let before_year = year
+        .and_then(|year| value.split(&year.to_string()).next())
+        .unwrap_or(value);
+    clean_title(before_year)
 }
 
 fn extract_year(value: &str) -> Option<i32> {
@@ -435,5 +607,43 @@ mod tests {
         assert_eq!(parsed.series_title.as_deref(), Some("La Casa Del Dragón"));
         assert_eq!(parsed.season_number, Some(3));
         assert_eq!(parsed.episode_number, Some(2));
+    }
+
+    #[test]
+    fn folder_context_overrides_a_conflicting_episode_filename() {
+        let parsed = parse_media_name(Path::new(
+            r"D:\media\La.Casa.Del.Dragon.temporada3.2026.1080P-Dual-Lat\House.Of.The.Dragon.S03E04.2026.mkv",
+        ));
+
+        assert_eq!(parsed.kind, MediaKind::Episode);
+        assert_eq!(parsed.series_title.as_deref(), Some("La Casa Del Dragon"));
+        assert_eq!(parsed.season_number, Some(3));
+        assert_eq!(parsed.episode_number, Some(4));
+        assert!(parsed.needs_review);
+    }
+
+    #[test]
+    fn infers_number_and_title_inside_a_season_folder() {
+        let parsed = parse_media_name(Path::new(
+            r"D:\media\The Show\Temporada 2\03 - El regreso.mkv",
+        ));
+
+        assert_eq!(parsed.kind, MediaKind::Episode);
+        assert_eq!(parsed.series_title.as_deref(), Some("The Show"));
+        assert_eq!(parsed.season_number, Some(2));
+        assert_eq!(parsed.episode_number, Some(3));
+        assert_eq!(parsed.title, "El regreso");
+        assert!(!parsed.needs_review);
+    }
+
+    #[test]
+    fn flags_a_season_file_without_an_episode_number() {
+        let parsed = parse_media_name(Path::new(
+            r"D:\media\The Show\Season 2\archivo sin numero.mkv",
+        ));
+
+        assert_eq!(parsed.kind, MediaKind::Movie);
+        assert!(parsed.needs_review);
+        assert!(parsed.review_reason.is_some());
     }
 }

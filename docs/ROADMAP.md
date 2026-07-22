@@ -66,6 +66,21 @@
 - Added local genre-based recommendations and starter genre inference from filenames/paths
 - Added a no-key Wikipedia metadata importer in the Rust backend, with Spanish-first lookup, English fallback, cast extraction, source URL, cached metadata JSON, manual retry, and ambiguity selection
 
+## Implemented for resilient series identification
+
+- Series scanning now combines the video filename with `Serie / Temporada` folder context instead of requiring a perfect `SxxExx` filename
+- Season folders accept `Temporada`, `Season`, and `Sxx`; episode files accept `SxxExx`, `1x01`, `Episodio`, `Episode`, `Capitulo`, `Chapter`, and leading episode numbers
+- Folder context has priority when a localized series folder conflicts with a filename, while the contradiction is sent to a review queue
+- Settings now includes an identification review queue for confirming a movie or manually assigning series, season, episode, and episode title
+- Review items can open Windows Explorer with the original file selected, while paths remain resolved only by the Rust backend
+- Each review item can rescan only its original folder, reconnect a renamed video by fingerprint, and remove the warning immediately when the new name is unambiguous
+- Manual identification decisions survive later scans and rebuild the SQLite series/season/episode hierarchy without renaming or moving source media
+- Series cards now open a series view grouped by season with playable episode rows instead of opening an arbitrary episode directly
+- Episode rows display a generated video thumbnail, play/detail actions, watch progress, and a short stored description when available
+- Unchanged files are reconciled from size and modification time before FFprobe/fingerprint work, avoiding repeated full analysis and duplicate catalog records
+- CINE WANA writes lightweight identification/description JSON manifests only to its private application cache; configured media roots remain read-only
+- Home keeps recently added movies chronological while rotating the main movie shelf and featured titles once per local calendar day
+
 ## Pending after the functional media pass
 
 - File-system watcher/debounce and scan concurrency tuning
@@ -74,6 +89,17 @@
 - Final visual refinements after the functional player is reviewed
 - Backup/export diagnostics and hardening
 
+## In progress: local remote control PWA
+
+- Prepared version 0.2.1 as the installable Windows x64 test update that exposes **Configuración → Control remoto** in the desktop application
+- Prepared version 0.3.0-rc.1 as the important pre-final updater release for resilient series identification, targeted rescans, daily discovery rotation, and the local remote-control PWA
+- Windows-hosted HTTP/WebSocket service for same-Wi-Fi control
+- QR and manual-URL pairing with approved, revocable device tokens
+- Mobile web remote for the internal player and existing library actions
+- Remote library mirrors the desktop movie rotation and exposes series as series → seasons → episodes, with episode artwork, description, details, and play actions
+- Offline-capable PWA shell, responsive Android layout, reconnection, and local security hardening
+- Validation on desktop first, followed by same-network mobile testing before commit or packaging
+
 ## Deferred
 
-- Android, API, WebSocket, streaming, QR, remote control
+- Native Android/iOS applications, video streaming, cloud APIs, and store distribution

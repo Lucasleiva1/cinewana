@@ -1,7 +1,9 @@
+mod remote;
+
 use cinewana_core::{
-    AccountDto, BootstrapDto, CatalogQuery, DEFAULT_LIBRARY_ROOT, ImageAnalysis,
-    ImageAnalysisProgress, MediaDetail, MediaMetadataCandidate, MediaMetadataUpdate, MediaSummary,
-    PlayerCommand, PlayerState, ScanProgress,
+    AccountDto, BootstrapDto, CatalogQuery, ClassificationUpdate, DEFAULT_LIBRARY_ROOT,
+    ImageAnalysis, ImageAnalysisProgress, MediaDetail, MediaMetadataCandidate, MediaMetadataUpdate,
+    MediaSummary, PlayerCommand, PlayerState, ScanProgress,
 };
 use cinewana_database::{Database, MetadataImportTarget};
 use cinewana_metadata::{MetadataSearchOutcome, WikipediaMetadataClient};
@@ -9,6 +11,7 @@ use cinewana_player::PlayerService;
 use parking_lot::Mutex;
 use std::{
     path::PathBuf,
+    process::Command,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -16,6 +19,7 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
+use remote::{RemotePlayerSnapshot, RemoteService, RemoteStatusDto};
 
 #[derive(Clone)]
 struct AppServices {
@@ -28,6 +32,7 @@ struct AppServices {
     cache_dir: PathBuf,
     metadata: Arc<WikipediaMetadataClient>,
     player: Arc<PlayerService>,
+    remote: Arc<RemoteService>,
 }
 
 #[tauri::command]
@@ -49,6 +54,10 @@ fn bootstrap(state: State<'_, AppServices>) -> Result<BootstrapDto, String> {
         active_account,
         ffprobe_available: state.ffprobe.is_some(),
         player_available: state.player.available(),
+        identification_reviews: state
+            .db
+            .identification_reviews()
+            .map_err(error_string)?,
     })
 }
 
@@ -103,6 +112,19 @@ fn media_detail(id: String, state: State<'_, AppServices>) -> Result<Option<Medi
 }
 
 #[tauri::command]
+fn resolve_identification(
+    media_id: String,
+    classification: ClassificationUpdate,
+    state: State<'_, AppServices>,
+) -> Result<(), String> {
+    state
+        .db
+        .resolve_identification(&media_id, &classification)
+        .map_err(error_string)?;
+    write_identification_cache(state.inner(), &media_id).map_err(error_string)
+}
+
+#[tauri::command]
 fn next_movie(
     media_id: String,
     state: State<'_, AppServices>,
@@ -123,7 +145,8 @@ fn update_media_metadata(
     state
         .db
         .update_media_metadata(&media_id, &metadata)
-        .map_err(error_string)
+        .map_err(error_string)?;
+    write_identification_cache(state.inner(), &media_id).map_err(error_string)
 }
 
 #[tauri::command]
@@ -138,7 +161,8 @@ async fn refresh_media_metadata(
         .ok_or_else(|| "No se encontró el archivo para buscar información".to_string())?;
     import_metadata_for_target(state.inner(), &target)
         .await
-        .map_err(error_string)
+        .map_err(error_string)?;
+    write_identification_cache(state.inner(), &media_id).map_err(error_string)
 }
 
 #[tauri::command]
@@ -164,7 +188,8 @@ async fn apply_metadata_candidate(
     state
         .db
         .apply_imported_metadata(&media_id, &metadata, Some(&json_path.to_string_lossy()))
-        .map_err(error_string)
+        .map_err(error_string)?;
+    write_identification_cache(state.inner(), &media_id).map_err(error_string)
 }
 
 #[tauri::command]
@@ -244,6 +269,102 @@ fn technical_path(
     state: State<'_, AppServices>,
 ) -> Result<Option<String>, String> {
     state.db.media_path(&media_id).map_err(error_string)
+}
+
+#[tauri::command]
+fn reveal_media_file(media_id: String, state: State<'_, AppServices>) -> Result<(), String> {
+    let path = state
+        .db
+        .media_path(&media_id)
+        .map_err(error_string)?
+        .map(PathBuf::from)
+        .ok_or_else(|| "El archivo ya no esta disponible".to_string())?;
+    if !path.is_file() {
+        return Err("El archivo ya no esta disponible".into());
+    }
+    Command::new("explorer.exe")
+        .arg("/select,")
+        .arg(&path)
+        .spawn()
+        .map(|_| ())
+        .map_err(error_string)
+}
+
+#[tauri::command]
+async fn rescan_media_item(
+    media_id: String,
+    app: AppHandle,
+    state: State<'_, AppServices>,
+) -> Result<bool, String> {
+    let target = state
+        .db
+        .media_scan_target(&media_id)
+        .map_err(error_string)?
+        .ok_or_else(|| "No se encontro el registro para reescanear".to_string())?;
+    let previous_path = PathBuf::from(&target.path);
+    let folder = previous_path
+        .parent()
+        .filter(|path| path.is_dir())
+        .ok_or_else(|| "La carpeta original ya no esta disponible".to_string())?
+        .to_path_buf();
+    let candidate = if previous_path.is_file() {
+        previous_path
+    } else {
+        let search_folder = folder.clone();
+        let files = tauri::async_runtime::spawn_blocking(move || {
+            cinewana_scanner::discover(&search_folder, false)
+        })
+        .await
+        .map_err(error_string)?
+        .map_err(error_string)?;
+        let matches = files
+            .into_iter()
+            .filter(|path| {
+                cinewana_scanner::file_state(path).is_ok_and(|file| {
+                    file.file_size == target.file_size && file.modified_at == target.modified_at
+                })
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [path] => path.clone(),
+            [] => {
+                return Err(
+                    "No se encontro en esa carpeta el archivo renombrado. Usa el reescaneo completo si tambien cambiaste su contenido"
+                        .into(),
+                );
+            }
+            _ => {
+                return Err(
+                    "Hay mas de un archivo posible en esa carpeta. Usa el reescaneo completo para evitar una asociacion incorrecta"
+                        .into(),
+                );
+            }
+        }
+    };
+    let file = cinewana_scanner::inspect(&candidate, state.ffprobe.as_deref())
+        .await
+        .map_err(error_string)?;
+    if file.fingerprint != target.fingerprint {
+        return Err(
+            "El archivo encontrado no coincide con el original. Usa el reescaneo completo de la biblioteca"
+                .into(),
+        );
+    }
+    let outcome = state
+        .db
+        .upsert_file(
+            &target.root_id,
+            &Uuid::new_v4().to_string(),
+            &file,
+        )
+        .map_err(error_string)?;
+    write_identification_cache(state.inner(), &outcome.media_id).map_err(error_string)?;
+    let still_needs_review = state
+        .db
+        .needs_identification_review(&target.media_id)
+        .map_err(error_string)?;
+    app.emit("library-changed", ()).map_err(error_string)?;
+    Ok(still_needs_review)
 }
 
 #[tauri::command]
@@ -394,6 +515,46 @@ fn player_command(
     Ok(result)
 }
 
+#[tauri::command]
+fn remote_status(state: State<'_, AppServices>) -> RemoteStatusDto {
+    state.remote.status()
+}
+
+#[tauri::command]
+async fn remote_start(state: State<'_, AppServices>) -> Result<RemoteStatusDto, String> {
+    state.remote.start().await
+}
+
+#[tauri::command]
+fn remote_stop(state: State<'_, AppServices>) -> RemoteStatusDto {
+    state.remote.stop()
+}
+
+#[tauri::command]
+fn remote_create_pairing(state: State<'_, AppServices>) -> Result<RemoteStatusDto, String> {
+    state.remote.create_pairing()
+}
+
+#[tauri::command]
+fn remote_approve_pairing(request_id: String, state: State<'_, AppServices>) -> Result<RemoteStatusDto, String> {
+    state.remote.approve(&request_id)
+}
+
+#[tauri::command]
+fn remote_reject_pairing(request_id: String, state: State<'_, AppServices>) -> RemoteStatusDto {
+    state.remote.reject(&request_id)
+}
+
+#[tauri::command]
+fn remote_revoke_device(device_id: String, state: State<'_, AppServices>) -> Result<RemoteStatusDto, String> {
+    state.remote.revoke(&device_id)
+}
+
+#[tauri::command]
+fn remote_update_player_state(snapshot: RemotePlayerSnapshot, state: State<'_, AppServices>) {
+    state.remote.update_player(snapshot);
+}
+
 fn spawn_scan(app: AppHandle, services: AppServices, reason: String) {
     if services
         .running
@@ -447,6 +608,23 @@ async fn import_metadata_for_target(
                 .store_metadata_candidates(&target.media_id, &[])?;
         }
     }
+    Ok(())
+}
+
+fn write_identification_cache(services: &AppServices, media_id: &str) -> anyhow::Result<()> {
+    let Some(entry) = services.db.identification_cache_entry(media_id)? else {
+        return Ok(());
+    };
+    let directory = services.cache_dir.join("identifications");
+    std::fs::create_dir_all(&directory)?;
+    let key = entry
+        .fingerprint
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .take(64)
+        .collect::<String>();
+    let path = directory.join(format!("{key}.json"));
+    std::fs::write(path, serde_json::to_vec_pretty(&entry.payload)?)?;
     Ok(())
 }
 
@@ -518,6 +696,24 @@ async fn run_scan(app: &AppHandle, services: &AppServices, reason: &str) -> anyh
                 };
                 app.emit("scan-progress", p.clone())?;
             }
+            let path_text = path.to_string_lossy().into_owned();
+            if let Ok(state) = cinewana_scanner::file_state(&path) {
+                let parsed = cinewana_core::parse_media_name(&path);
+                if let Some(outcome) = services
+                    .db
+                    .reconcile_unchanged_file(
+                        &scan_id,
+                        &path_text,
+                        state.file_size,
+                        state.modified_at,
+                        &parsed,
+                    )?
+                {
+                    local_skipped += 1;
+                    let _ = write_identification_cache(services, &outcome.media_id);
+                    continue;
+                }
+            }
             match cinewana_scanner::inspect(&path, services.ffprobe.as_deref()).await {
                 Ok(file) => match services.db.upsert_file(&root_id, &scan_id, &file) {
                     Ok(outcome) => {
@@ -575,6 +771,7 @@ async fn run_scan(app: &AppHandle, services: &AppServices, reason: &str) -> anyh
                                 tokio::time::sleep(std::time::Duration::from_millis(350)).await;
                             }
                         }
+                        let _ = write_identification_cache(services, &outcome.media_id);
                     }
                     Err(_) => local_errors += 1,
                 },
@@ -692,9 +889,11 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let app_data = app.path().app_data_dir()?;
+            let resource_dir = app.path().resource_dir()?;
             let db = Arc::new(Database::open(app_data.join("cine-wana.db"))?);
             db.seed_root(DEFAULT_LIBRARY_ROOT)?;
             let ffmpeg = find_command("ffmpeg");
+            let remote = RemoteService::new(db.clone(), app.handle().clone(), &app_data, &resource_dir);
             let services = AppServices {
                 db,
                 progress: Arc::new(Mutex::new(ScanProgress::default())),
@@ -705,6 +904,7 @@ pub fn run() {
                 cache_dir: app_data.join("cache"),
                 metadata: Arc::new(WikipediaMetadataClient::new()?),
                 player: Arc::new(PlayerService::discover()),
+                remote,
             };
             app.manage(services.clone());
             let handle = app.handle().clone();
@@ -721,6 +921,7 @@ pub fn run() {
             logout_account,
             catalog,
             media_detail,
+            resolve_identification,
             next_movie,
             update_media_metadata,
             refresh_media_metadata,
@@ -732,9 +933,19 @@ pub fn run() {
             cancel_scan,
             replace_library_root,
             technical_path,
+            reveal_media_file,
+            rescan_media_item,
             analyze_media_image,
             player_state,
-            player_command
+            player_command,
+            remote_status,
+            remote_start,
+            remote_stop,
+            remote_create_pairing,
+            remote_approve_pairing,
+            remote_reject_pairing,
+            remote_revoke_device,
+            remote_update_player_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running CINE WANA");

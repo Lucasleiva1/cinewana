@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { App } from './App';
 import './styles.css';
 import './media.css';
+import './remoteSettings.css';
 
 async function prepareDevRuntime() {
   if (import.meta.env.DEV && !('__TAURI_INTERNALS__' in window)) {

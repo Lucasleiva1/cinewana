@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{Datelike, Local, Utc};
 use cinewana_core::{
-    AccountDto, CatalogQuery, HomeDto, ImportedMediaMetadata, LibraryRootDto, MediaDetail,
-    MediaKind, MediaMetadataCandidate, MediaMetadataUpdate, MediaSummary, MediaTechnical,
-    MediaTrack, ParsedMediaName, RootStatus, SeriesSummary,
+    AccountDto, CatalogQuery, ClassificationUpdate, HomeDto, IdentificationReview,
+    ImportedMediaMetadata, LibraryRootDto, MediaDetail, MediaKind, MediaMetadataCandidate,
+    MediaMetadataUpdate, MediaSummary, MediaTechnical, MediaTrack, ParsedMediaName, RootStatus,
+    SeriesSeasonSummary, SeriesSummary,
 };
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -44,6 +45,22 @@ pub struct MetadataImportTarget {
     pub year: Option<i32>,
     pub kind: MediaKind,
     pub file_name: String,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct IdentificationCacheEntry {
+    pub fingerprint: String,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct MediaScanTarget {
+    pub media_id: String,
+    pub root_id: String,
+    pub path: String,
+    pub file_size: i64,
+    pub modified_at: i64,
     pub fingerprint: String,
 }
 
@@ -186,6 +203,14 @@ impl Database {
         self.ensure_media_column("metadata_checked_at", "TEXT", 7)?;
         self.ensure_media_column("metadata_candidates_json", "TEXT NOT NULL DEFAULT '[]'", 8)?;
         self.ensure_media_column("metadata_json_path", "TEXT", 9)?;
+        self.ensure_media_column(
+            "identification_source",
+            "TEXT NOT NULL DEFAULT 'legacy'",
+            10,
+        )?;
+        self.ensure_media_column("needs_review", "INTEGER NOT NULL DEFAULT 0", 11)?;
+        self.ensure_media_column("review_reason", "TEXT", 12)?;
+        self.ensure_media_column("manual_classification", "INTEGER NOT NULL DEFAULT 0", 13)?;
         Ok(())
     }
 
@@ -426,6 +451,7 @@ impl Database {
                     "UPDATE media_files SET offline=0,last_seen_scan=?1,updated_at=?2 WHERE id=?3",
                     params![scan_id, now, file_id],
                 )?;
+                self.sync_identification_locked(&conn, &media_id, &file.parsed, &now)?;
                 return Ok(UpsertOutcome {
                     media_id,
                     inserted: false,
@@ -433,6 +459,7 @@ impl Database {
                 });
             }
             update_media_and_file(&conn, &media_id, &file_id, root_id, scan_id, file, &now)?;
+            self.sync_identification_locked(&conn, &media_id, &file.parsed, &now)?;
             self.replace_external_tracks_locked(&conn, &file_id, &file.external_subtitles)?;
             return Ok(UpsertOutcome {
                 media_id,
@@ -446,6 +473,7 @@ impl Database {
             params![root_id, file.fingerprint], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
         ).optional()? {
             update_media_and_file(&conn, &media_id, &file_id, root_id, scan_id, file, &now)?;
+            self.sync_identification_locked(&conn, &media_id, &file.parsed, &now)?;
             self.replace_external_tracks_locked(&conn, &file_id, &file.external_subtitles)?;
             return Ok(UpsertOutcome { media_id, inserted: false, skipped: false });
         }
@@ -454,8 +482,8 @@ impl Database {
         let file_id = Uuid::new_v4().to_string();
         let genres_json = serde_json::to_string(&infer_genres(file))?;
         conn.execute(
-            "INSERT INTO media_items(id,kind,title,sort_title,year,genres_json,runtime_ms,series_title,season_number,episode_number,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?11)",
-            params![media_id, kind_text(&file.parsed.kind), file.parsed.title, file.parsed.title.to_lowercase(), file.parsed.year, genres_json, file.technical.duration_ms, file.parsed.series_title, file.parsed.season_number, file.parsed.episode_number, now],
+            "INSERT INTO media_items(id,kind,title,sort_title,year,genres_json,runtime_ms,series_title,season_number,episode_number,identification_source,needs_review,review_reason,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?14)",
+            params![media_id, kind_text(&file.parsed.kind), file.parsed.title, file.parsed.title.to_lowercase(), file.parsed.year, genres_json, file.technical.duration_ms, file.parsed.series_title, file.parsed.season_number, file.parsed.episode_number, file.parsed.identification_source, file.parsed.needs_review, file.parsed.review_reason, now],
         )?;
         conn.execute(
             "INSERT INTO media_files(id,media_item_id,library_root_id,path,file_name,file_size,modified_at,fingerprint,container,duration_ms,width,height,video_codec,audio_codec,hdr_type,offline,last_seen_scan,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,0,?16,?17,?17)",
@@ -468,6 +496,38 @@ impl Database {
             inserted: true,
             skipped: false,
         })
+    }
+
+    pub fn reconcile_unchanged_file(
+        &self,
+        scan_id: &str,
+        path: &str,
+        file_size: i64,
+        modified_at: i64,
+        parsed: &ParsedMediaName,
+    ) -> Result<Option<UpsertOutcome>> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.connection.lock();
+        let existing = conn
+            .query_row(
+                "SELECT id,media_item_id FROM media_files WHERE path=?1 AND file_size=?2 AND modified_at=?3",
+                params![path, file_size, modified_at],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((file_id, media_id)) = existing else {
+            return Ok(None);
+        };
+        conn.execute(
+            "UPDATE media_files SET offline=0,last_seen_scan=?1,updated_at=?2 WHERE id=?3",
+            params![scan_id, now, file_id],
+        )?;
+        self.sync_identification_locked(&conn, &media_id, parsed, &now)?;
+        Ok(Some(UpsertOutcome {
+            media_id,
+            inserted: false,
+            skipped: true,
+        }))
     }
 
     pub fn set_artwork(
@@ -484,6 +544,51 @@ impl Database {
              preview_cache_key=?3,updated_at=?4 WHERE id=?5",
             params![poster,backdrop,preview,Utc::now().to_rfc3339(),media_id],
         )?;
+        Ok(())
+    }
+
+    fn sync_identification_locked(
+        &self,
+        conn: &Connection,
+        media_id: &str,
+        parsed: &ParsedMediaName,
+        now: &str,
+    ) -> Result<()> {
+        let manual_classification = conn.query_row(
+            "SELECT manual_classification FROM media_items WHERE id=?1",
+            [media_id],
+            |row| row.get::<_, i64>(0),
+        )? != 0;
+        if manual_classification {
+            return Ok(());
+        }
+        conn.execute(
+            "UPDATE media_items SET
+             kind=?1,
+             title=CASE WHEN manual_metadata=0 THEN ?2 ELSE title END,
+             sort_title=CASE WHEN manual_metadata=0 THEN ?3 ELSE sort_title END,
+             year=CASE WHEN manual_metadata=0 THEN ?4 ELSE year END,
+             series_title=?5,season_number=?6,episode_number=?7,
+             identification_source=?8,needs_review=?9,review_reason=?10,updated_at=?11
+             WHERE id=?12",
+            params![
+                kind_text(&parsed.kind),
+                parsed.title,
+                parsed.title.to_lowercase(),
+                parsed.year,
+                parsed.series_title,
+                parsed.season_number,
+                parsed.episode_number,
+                parsed.identification_source,
+                parsed.needs_review,
+                parsed.review_reason,
+                now,
+                media_id
+            ],
+        )?;
+        conn.execute("DELETE FROM episodes WHERE media_item_id=?1", [media_id])?;
+        self.ensure_episode_hierarchy_locked(conn, media_id, parsed, now)?;
+        cleanup_empty_series_locked(conn)?;
         Ok(())
     }
 
@@ -636,9 +741,150 @@ impl Database {
         Ok(items.into_iter().skip(offset).take(limit).collect())
     }
 
+    pub fn identification_reviews(&self) -> Result<Vec<IdentificationReview>> {
+        let conn = self.connection.lock();
+        let mut statement = conn.prepare(
+            "SELECT m.id,f.file_name,m.kind,m.title,m.series_title,m.season_number,m.episode_number,
+                    COALESCE(m.review_reason,'Identificacion pendiente')
+             FROM media_items m
+             JOIN media_files f ON f.media_item_id=m.id
+             WHERE m.needs_review=1 AND f.offline=0
+             ORDER BY lower(f.file_name)",
+        )?;
+        statement
+            .query_map([], |row| {
+                let kind: String = row.get(2)?;
+                Ok(IdentificationReview {
+                    media_id: row.get(0)?,
+                    file_name: row.get(1)?,
+                    kind: if kind == "episode" {
+                        MediaKind::Episode
+                    } else {
+                        MediaKind::Movie
+                    },
+                    title: row.get(3)?,
+                    series_title: row.get(4)?,
+                    season_number: row.get(5)?,
+                    episode_number: row.get(6)?,
+                    reason: row.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn resolve_identification(
+        &self,
+        media_id: &str,
+        update: &ClassificationUpdate,
+    ) -> Result<()> {
+        let title = update.title.trim();
+        if title.is_empty() {
+            anyhow::bail!("El titulo no puede estar vacio");
+        }
+        if update.kind == MediaKind::Episode
+            && (update
+                .series_title
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default()
+                .is_empty()
+                || update.season_number.is_none()
+                || update.episode_number.is_none())
+        {
+            anyhow::bail!("Una serie necesita nombre, temporada y episodio");
+        }
+        let now = Utc::now().to_rfc3339();
+        let conn = self.connection.lock();
+        let series_title = if update.kind == MediaKind::Episode {
+            update.series_title.as_deref().map(str::trim)
+        } else {
+            None
+        };
+        conn.execute(
+            "UPDATE media_items SET kind=?1,title=?2,sort_title=?3,series_title=?4,
+             season_number=?5,episode_number=?6,identification_source='manual',needs_review=0,
+             review_reason=NULL,manual_classification=1,updated_at=?7 WHERE id=?8",
+            params![
+                kind_text(&update.kind),
+                title,
+                title.to_lowercase(),
+                series_title,
+                if update.kind == MediaKind::Episode {
+                    update.season_number
+                } else {
+                    None
+                },
+                if update.kind == MediaKind::Episode {
+                    update.episode_number
+                } else {
+                    None
+                },
+                now,
+                media_id
+            ],
+        )?;
+        conn.execute("DELETE FROM episodes WHERE media_item_id=?1", [media_id])?;
+        if update.kind == MediaKind::Episode {
+            let parsed = ParsedMediaName {
+                kind: MediaKind::Episode,
+                title: title.to_string(),
+                year: None,
+                series_title: series_title.map(str::to_string),
+                season_number: update.season_number,
+                episode_number: update.episode_number,
+                identification_source: "manual".into(),
+                needs_review: false,
+                review_reason: None,
+            };
+            self.ensure_episode_hierarchy_locked(&conn, media_id, &parsed, &now)?;
+        }
+        cleanup_empty_series_locked(&conn)?;
+        Ok(())
+    }
+
+    pub fn identification_cache_entry(
+        &self,
+        media_id: &str,
+    ) -> Result<Option<IdentificationCacheEntry>> {
+        let conn = self.connection.lock();
+        conn.query_row(
+            "SELECT f.fingerprint,f.file_name,m.kind,m.title,m.year,m.series_title,
+                    m.season_number,m.episode_number,m.identification_source,m.needs_review,
+                    m.review_reason,m.overview,m.genres_json,m.cast_json,m.updated_at
+             FROM media_items m JOIN media_files f ON f.media_item_id=m.id WHERE m.id=?1 LIMIT 1",
+            [media_id],
+            |row| {
+                let fingerprint: String = row.get(0)?;
+                Ok(IdentificationCacheEntry {
+                    fingerprint,
+                    payload: serde_json::json!({
+                        "mediaId": media_id,
+                        "fileName": row.get::<_, String>(1)?,
+                        "kind": row.get::<_, String>(2)?,
+                        "title": row.get::<_, String>(3)?,
+                        "year": row.get::<_, Option<i32>>(4)?,
+                        "seriesTitle": row.get::<_, Option<String>>(5)?,
+                        "seasonNumber": row.get::<_, Option<i32>>(6)?,
+                        "episodeNumber": row.get::<_, Option<i32>>(7)?,
+                        "identificationSource": row.get::<_, String>(8)?,
+                        "needsReview": row.get::<_, i64>(9)? != 0,
+                        "reviewReason": row.get::<_, Option<String>>(10)?,
+                        "overview": row.get::<_, Option<String>>(11)?,
+                        "genres": serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(12)?).unwrap_or_else(|_| serde_json::json!([])),
+                        "cast": serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(13)?).unwrap_or_else(|_| serde_json::json!([])),
+                        "updatedAt": row.get::<_, String>(14)?,
+                    }),
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn home(&self, account_id: Option<&str>) -> Result<HomeDto> {
         let all = self.catalog(account_id, &CatalogQuery::default())?;
-        let movies: Vec<_> = all
+        let mut movies: Vec<_> = all
             .iter()
             .filter(|m| m.kind == MediaKind::Movie)
             .cloned()
@@ -655,43 +901,69 @@ impl Database {
             .take(20)
             .cloned()
             .collect();
-        let heroes = movies.iter().take(3).cloned().collect();
         let recently_added = movies.iter().take(30).cloned().collect();
-        let mut series_map: BTreeMap<String, (BTreeSet<i32>, u32, String, Option<String>, String)> =
-            BTreeMap::new();
+        order_movies_for_rotation(
+            &mut movies,
+            daily_movie_rotation_bucket(Local::now().date_naive()),
+        );
+        let heroes = movies.iter().take(3).cloned().collect();
+        let mut series_map: BTreeMap<
+            String,
+            (
+                BTreeMap<i32, Vec<MediaSummary>>,
+                String,
+                Option<String>,
+                String,
+            ),
+        > = BTreeMap::new();
         for item in all.iter().filter(|m| m.kind == MediaKind::Episode) {
             let title = item
                 .series_title
                 .clone()
                 .unwrap_or_else(|| item.title.clone());
             let entry = series_map.entry(title).or_insert((
-                BTreeSet::new(),
-                0,
+                BTreeMap::new(),
                 item.added_at.clone(),
                 item.artwork_url.clone(),
                 item.id.clone(),
             ));
-            entry.1 += 1;
-            entry.0.insert(item.season_number.unwrap_or(0));
-            if item.added_at > entry.2 {
-                entry.2 = item.added_at.clone();
-                entry.4 = item.id.clone();
+            entry
+                .0
+                .entry(item.season_number.unwrap_or(0))
+                .or_default()
+                .push(item.clone());
+            if item.added_at > entry.1 {
+                entry.1 = item.added_at.clone();
+                entry.3 = item.id.clone();
             }
-            if entry.3.is_none() {
-                entry.3 = item.artwork_url.clone();
+            if entry.2.is_none() {
+                entry.2 = item.artwork_url.clone();
             }
         }
         let series = series_map
             .into_iter()
             .map(
-                |(title, (seasons, episodes, latest_added_at, artwork_url, episode_id))| {
+                |(title, (mut seasons, latest_added_at, artwork_url, episode_id))| {
+                    let episode_count = seasons.values().map(Vec::len).sum::<usize>() as u32;
+                    let season_items = seasons
+                        .iter_mut()
+                        .map(|(season_number, episodes)| {
+                            episodes.sort_by_key(|episode| episode.episode_number.unwrap_or(0));
+                            SeriesSeasonSummary {
+                                season_number: *season_number,
+                                title: format!("Temporada {season_number}"),
+                                episodes: episodes.clone(),
+                            }
+                        })
+                        .collect::<Vec<_>>();
                     SeriesSummary {
                         episode_id,
                         title,
-                        seasons: seasons.len() as u32,
-                        episodes,
+                        seasons: season_items.len() as u32,
+                        episodes: episode_count,
                         artwork_url,
                         latest_added_at,
+                        season_items,
                     }
                 },
             )
@@ -1018,6 +1290,42 @@ impl Database {
             .map_err(Into::into)
     }
 
+    pub fn media_scan_target(&self, media_id: &str) -> Result<Option<MediaScanTarget>> {
+        self.connection
+            .lock()
+            .query_row(
+                "SELECT f.media_item_id,f.library_root_id,f.path,f.file_size,f.modified_at,f.fingerprint
+                 FROM media_files f WHERE f.media_item_id=?1 LIMIT 1",
+                [media_id],
+                |row| {
+                    Ok(MediaScanTarget {
+                        media_id: row.get(0)?,
+                        root_id: row.get(1)?,
+                        path: row.get(2)?,
+                        file_size: row.get(3)?,
+                        modified_at: row.get(4)?,
+                        fingerprint: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn needs_identification_review(&self, media_id: &str) -> Result<bool> {
+        Ok(self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT needs_review FROM media_items WHERE id=?1",
+                [media_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or_default()
+            != 0)
+    }
+
     pub fn backup_to(&self, target: &Path) -> Result<()> {
         let escaped = target.to_string_lossy().replace('\'', "''");
         self.connection
@@ -1028,7 +1336,7 @@ impl Database {
 }
 
 const MEDIA_SELECT: &str = r#"
-SELECT m.id,m.kind,m.title,m.year,m.series_title,m.season_number,m.episode_number,
+SELECT m.id,m.kind,m.title,m.year,m.series_title,m.season_number,m.episode_number,m.overview,
        COALESCE(p.position_ms,0),COALESCE(p.duration_ms,COALESCE(m.runtime_ms,f.duration_ms,0)),COALESCE(p.completed,0),
        COALESCE(u.favorite,0),COALESCE(u.in_watchlist,0),f.offline,m.created_at,m.poster_cache_key,m.backdrop_cache_key,m.preview_cache_key,
        COALESCE(m.runtime_ms,f.duration_ms),f.width,f.height,f.container,f.video_codec,f.audio_codec,f.hdr_type
@@ -1039,7 +1347,7 @@ WHERE f.offline=0 ORDER BY m.created_at DESC
 "#;
 
 const MEDIA_SELECT_BY_ID: &str = r#"
-SELECT m.id,m.kind,m.title,m.year,m.series_title,m.season_number,m.episode_number,
+SELECT m.id,m.kind,m.title,m.year,m.series_title,m.season_number,m.episode_number,m.overview,
        COALESCE(p.position_ms,0),COALESCE(p.duration_ms,COALESCE(m.runtime_ms,f.duration_ms,0)),COALESCE(p.completed,0),
        COALESCE(u.favorite,0),COALESCE(u.in_watchlist,0),f.offline,m.created_at,m.poster_cache_key,m.backdrop_cache_key,m.preview_cache_key,
        COALESCE(m.runtime_ms,f.duration_ms),f.width,f.height,f.container,f.video_codec,f.audio_codec,f.hdr_type
@@ -1380,8 +1688,8 @@ fn to_hex(bytes: &[u8]) -> String {
 
 fn row_to_summary(row: &Row<'_>) -> rusqlite::Result<MediaSummary> {
     let kind: String = row.get(1)?;
-    let position: i64 = row.get(7)?;
-    let duration: i64 = row.get(8)?;
+    let position: i64 = row.get(8)?;
+    let duration: i64 = row.get(9)?;
     Ok(MediaSummary {
         id: row.get(0)?,
         kind: if kind == "episode" {
@@ -1394,29 +1702,42 @@ fn row_to_summary(row: &Row<'_>) -> rusqlite::Result<MediaSummary> {
         series_title: row.get(4)?,
         season_number: row.get(5)?,
         episode_number: row.get(6)?,
+        overview: row.get(7)?,
         progress_percent: if duration > 0 {
             (position as f64 / duration as f64 * 100.0).clamp(0.0, 100.0)
         } else {
             0.0
         },
-        completed: row.get::<_, i64>(9)? != 0,
-        favorite: row.get::<_, i64>(10)? != 0,
-        in_watchlist: row.get::<_, i64>(11)? != 0,
-        offline: row.get::<_, i64>(12)? != 0,
-        added_at: row.get(13)?,
-        artwork_url: row.get(14)?,
-        backdrop_url: row.get(15)?,
-        preview_url: row.get(16)?,
+        completed: row.get::<_, i64>(10)? != 0,
+        favorite: row.get::<_, i64>(11)? != 0,
+        in_watchlist: row.get::<_, i64>(12)? != 0,
+        offline: row.get::<_, i64>(13)? != 0,
+        added_at: row.get(14)?,
+        artwork_url: row.get(15)?,
+        backdrop_url: row.get(16)?,
+        preview_url: row.get(17)?,
         technical: MediaTechnical {
-            duration_ms: row.get(17)?,
-            width: row.get(18)?,
-            height: row.get(19)?,
-            container: row.get(20)?,
-            video_codec: row.get(21)?,
-            audio_codec: row.get(22)?,
-            hdr_type: row.get(23)?,
+            duration_ms: row.get(18)?,
+            width: row.get(19)?,
+            height: row.get(20)?,
+            container: row.get(21)?,
+            video_codec: row.get(22)?,
+            audio_codec: row.get(23)?,
+            hdr_type: row.get(24)?,
         },
     })
+}
+
+fn cleanup_empty_series_locked(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "DELETE FROM seasons WHERE NOT EXISTS (SELECT 1 FROM episodes e WHERE e.season_id=seasons.id)",
+        [],
+    )?;
+    conn.execute(
+        "DELETE FROM series WHERE NOT EXISTS (SELECT 1 FROM seasons se WHERE se.series_id=series.id)",
+        [],
+    )?;
+    Ok(())
 }
 
 fn update_media_and_file(
@@ -1429,7 +1750,7 @@ fn update_media_and_file(
     now: &str,
 ) -> Result<()> {
     let genres_json = serde_json::to_string(&infer_genres(file))?;
-    conn.execute("UPDATE media_items SET kind=?1,title=?2,sort_title=?3,year=?4,runtime_ms=?5,series_title=?6,season_number=?7,episode_number=?8,genres_json=?9,updated_at=?10 WHERE id=?11 AND manual_metadata=0", params![kind_text(&file.parsed.kind),file.parsed.title,file.parsed.title.to_lowercase(),file.parsed.year,file.technical.duration_ms,file.parsed.series_title,file.parsed.season_number,file.parsed.episode_number,genres_json,now,media_id])?;
+    conn.execute("UPDATE media_items SET kind=?1,title=?2,sort_title=?3,year=?4,runtime_ms=?5,series_title=?6,season_number=?7,episode_number=?8,genres_json=?9,updated_at=?10 WHERE id=?11 AND manual_metadata=0 AND manual_classification=0", params![kind_text(&file.parsed.kind),file.parsed.title,file.parsed.title.to_lowercase(),file.parsed.year,file.technical.duration_ms,file.parsed.series_title,file.parsed.season_number,file.parsed.episode_number,genres_json,now,media_id])?;
     conn.execute("UPDATE media_files SET library_root_id=?1,path=?2,file_name=?3,file_size=?4,modified_at=?5,fingerprint=?6,container=?7,duration_ms=?8,width=?9,height=?10,video_codec=?11,audio_codec=?12,hdr_type=?13,offline=0,last_seen_scan=?14,updated_at=?15 WHERE id=?16", params![root_id,file.path,file.file_name,file.file_size,file.modified_at,file.fingerprint,file.technical.container,file.technical.duration_ms,file.technical.width,file.technical.height,file.technical.video_codec,file.technical.audio_codec,file.technical.hdr_type,scan_id,now,file_id])?;
     Ok(())
 }
@@ -1449,9 +1770,22 @@ fn parse_root_status(value: &str) -> RootStatus {
     }
 }
 
+fn daily_movie_rotation_bucket(date: chrono::NaiveDate) -> i32 {
+    date.num_days_from_ce()
+}
+
+fn movie_rotation_key(media_id: &str, bucket: i32) -> [u8; 32] {
+    Sha256::digest(format!("{bucket}:{media_id}").as_bytes()).into()
+}
+
+fn order_movies_for_rotation(movies: &mut [MediaSummary], bucket: i32) {
+    movies.sort_by_cached_key(|movie| movie_rotation_key(&movie.id, bucket));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use cinewana_core::parse_media_name;
 
     fn discovered_file(path: &str, fingerprint: &str) -> DiscoveredFile {
@@ -1466,6 +1800,41 @@ mod tests {
             technical: MediaTechnical::default(),
             external_subtitles: vec![],
         }
+    }
+
+    #[test]
+    fn movie_rotation_is_stable_for_a_day_and_changes_the_next_day() {
+        let first_day = Utc.with_ymd_and_hms(2026, 7, 21, 3, 0, 0).unwrap();
+        let same_day = Utc.with_ymd_and_hms(2026, 7, 21, 22, 59, 59).unwrap();
+        let next_day = Utc.with_ymd_and_hms(2026, 7, 22, 3, 0, 0).unwrap();
+        let ids = [
+            "alien",
+            "arrival",
+            "blade-runner",
+            "heat",
+            "jaws",
+            "moon",
+            "parasite",
+            "vertigo",
+        ];
+        let order = |bucket| {
+            let mut values = ids;
+            values.sort_by_cached_key(|id| movie_rotation_key(id, bucket));
+            values
+        };
+
+        assert_eq!(
+            daily_movie_rotation_bucket(first_day.date_naive()),
+            daily_movie_rotation_bucket(same_day.date_naive())
+        );
+        assert_eq!(
+            order(daily_movie_rotation_bucket(first_day.date_naive())),
+            order(daily_movie_rotation_bucket(same_day.date_naive()))
+        );
+        assert_ne!(
+            order(daily_movie_rotation_bucket(first_day.date_naive())),
+            order(daily_movie_rotation_bucket(next_day.date_naive()))
+        );
     }
 
     #[test]
@@ -1692,6 +2061,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(detail.summary.title, "Night House");
+        assert_eq!(
+            detail.summary.overview.as_deref(),
+            Some("A personal description")
+        );
         assert_eq!(detail.genres, vec!["Terror", "Drama"]);
         assert_eq!(detail.cast, vec!["Actor One", "Actor Two"]);
         assert!(detail.manual_metadata);
@@ -1705,5 +2078,99 @@ mod tests {
                 .iter()
                 .any(|item| item.id == related_id)
         );
+    }
+
+    #[test]
+    fn renamed_episode_reuses_the_record_and_clears_its_review() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        let old_path = r"D:\media\La Casa Del Dragon Temporada 3\House.Of.The.Dragon.S03E04.mkv";
+        let new_path = r"D:\media\La Casa Del Dragon Temporada 3\La.Casa.Del.Dragon.S03E04.mkv";
+        let mut file = DiscoveredFile {
+            path: old_path.into(),
+            file_name: "House.Of.The.Dragon.S03E04.mkv".into(),
+            file_size: 10,
+            modified_at: 1,
+            fingerprint: "same-content".into(),
+            parsed: parse_media_name(Path::new(old_path)),
+            technical: MediaTechnical::default(),
+            external_subtitles: vec![],
+        };
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        let original = db.upsert_file(&root, "scan-1", &file).unwrap();
+        assert_eq!(db.identification_reviews().unwrap().len(), 1);
+
+        file.path = new_path.into();
+        file.file_name = "La.Casa.Del.Dragon.S03E04.mkv".into();
+        file.parsed = parse_media_name(Path::new(new_path));
+        let renamed = db.upsert_file(&root, "targeted", &file).unwrap();
+
+        assert_eq!(renamed.media_id, original.media_id);
+        assert!(db.identification_reviews().unwrap().is_empty());
+        assert_eq!(
+            db.media_path(&original.media_id).unwrap().as_deref(),
+            Some(new_path)
+        );
+        assert_eq!(
+            db.connection
+                .lock()
+                .query_row("SELECT COUNT(*) FROM media_files", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn manual_episode_identification_survives_later_scans() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        let path = r"D:\media\Mystery Show\Temporada 2\archivo sin numero.mkv";
+        let file = DiscoveredFile {
+            path: path.into(),
+            file_name: "archivo sin numero.mkv".into(),
+            file_size: 10,
+            modified_at: 1,
+            fingerprint: "manual-review".into(),
+            parsed: parse_media_name(Path::new(path)),
+            technical: MediaTechnical::default(),
+            external_subtitles: vec![],
+        };
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        let outcome = db.upsert_file(&root, "scan-1", &file).unwrap();
+        assert_eq!(db.identification_reviews().unwrap().len(), 1);
+
+        db.resolve_identification(
+            &outcome.media_id,
+            &ClassificationUpdate {
+                kind: MediaKind::Episode,
+                title: "El comienzo".into(),
+                series_title: Some("Mystery Show".into()),
+                season_number: Some(2),
+                episode_number: Some(1),
+            },
+        )
+        .unwrap();
+        assert!(db.identification_reviews().unwrap().is_empty());
+
+        db.start_scan(&root, "scan-2", "test").unwrap();
+        db.reconcile_unchanged_file("scan-2", path, 10, 1, &parse_media_name(Path::new(path)))
+            .unwrap()
+            .unwrap();
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        let item = db
+            .catalog(Some(&account.id), &CatalogQuery::default())
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(item.kind, MediaKind::Episode);
+        assert_eq!(item.title, "El comienzo");
+        assert_eq!(item.series_title.as_deref(), Some("Mystery Show"));
+        assert_eq!(item.season_number, Some(2));
+        assert_eq!(item.episode_number, Some(1));
+
+        let home = db.home(Some(&account.id)).unwrap();
+        assert_eq!(home.series.len(), 1);
+        assert_eq!(home.series[0].season_items[0].episodes[0].id, item.id);
     }
 }

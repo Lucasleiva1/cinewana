@@ -6,7 +6,7 @@ import {
   ExternalLink, Maximize, Pause, Play, RotateCcw, SkipBack, SkipForward,
   SlidersHorizontal, Sparkles, Volume2, VolumeX, X
 } from 'lucide-react';
-import type { ImageAnalysis, ImageAnalysisProgress, ImageSettings, MediaDetail, MediaSummary } from './types';
+import type { ImageAnalysis, ImageAnalysisProgress, ImageSettings, MediaDetail, MediaSummary, RemoteCommand, RemotePlayerSnapshot } from './types';
 
 export interface InternalPlayerSource {
   detail: MediaDetail;
@@ -193,6 +193,73 @@ export function InternalPlayer({
         setError('No se pudo activar pantalla completa.');
       }
     })();
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void listen<RemoteCommand>('remote-command', event => {
+      const command = event.payload;
+      const video = videoRef.current;
+      if (!video) return;
+      if (command.type === 'player_toggle') togglePlay();
+      if (command.type === 'player_seek_by') seekBy(command.seconds);
+      if (command.type === 'player_seek_to') {
+        video.currentTime = clamp(command.seconds, 0, video.duration || duration || 0);
+        setCurrent(video.currentTime);
+      }
+      if (command.type === 'player_set_volume') {
+        video.volume = clamp(command.volume, 0, 1);
+        video.muted = video.volume === 0;
+        setVolume(video.volume);
+        setMuted(video.muted);
+      }
+      if (command.type === 'player_toggle_mute') {
+        video.muted = !video.muted;
+        setMuted(video.muted);
+      }
+      if (command.type === 'player_toggle_fullscreen') toggleFullscreen();
+      if (command.type === 'player_set_image' && command.setting_id in defaultImage) {
+        setImage(previous => ({ ...previous, [command.setting_id]: clamp(command.value, -50, 50) }));
+      }
+      if (command.type === 'player_reset_image') setImage(defaultImage);
+    }).then(unlisten => {
+      if (disposed) unlisten(); else cleanup = unlisten;
+    });
+    return () => { disposed = true; cleanup?.(); };
+  }, [duration, seekBy, toggleFullscreen, togglePlay]);
+
+  useEffect(() => {
+    const height = source.detail.technical.height;
+    const quality = height ? (height >= 2160 ? '4K' : height >= 1080 ? '1080p' : height >= 720 ? '720p' : `${height}p`) : undefined;
+    const labels: Record<keyof ImageSettings, string> = {
+      brightness: 'Brillo', contrast: 'Contraste', saturation: 'Saturación', shadows: 'Sombras', highlights: 'Luces', temperature: 'Temperatura',
+    };
+    const snapshot: RemotePlayerSnapshot = {
+      active: true,
+      mediaId: source.detail.id,
+      title,
+      year: source.detail.year,
+      quality,
+      positionSeconds: current,
+      durationSeconds: duration,
+      playing,
+      volume,
+      muted,
+      fullscreen,
+      imageSettings: (Object.keys(image) as Array<keyof ImageSettings>).map(id => ({ id, label: labels[id], value: image[id], min: -50, max: 50, step: 1, defaultValue: 0 })),
+      audioTracks: [],
+      subtitleTracks: [],
+    };
+    void invoke('remote_update_player_state', { snapshot }).catch(() => {});
+  }, [current, duration, fullscreen, image, muted, playing, source.detail.id, source.detail.technical.height, source.detail.year, title, volume]);
+
+  useEffect(() => () => {
+    const snapshot: RemotePlayerSnapshot = {
+      active: false, positionSeconds: 0, durationSeconds: 0, playing: false, volume: 0.8,
+      muted: false, fullscreen: false, imageSettings: [], audioTracks: [], subtitleTracks: [],
+    };
+    void invoke('remote_update_player_state', { snapshot }).catch(() => {});
   }, []);
 
   const openExternal = useCallback(async () => {

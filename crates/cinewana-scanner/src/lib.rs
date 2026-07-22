@@ -18,6 +18,27 @@ const ANALYSIS_WIDTH: usize = 160;
 const ANALYSIS_HEIGHT: usize = 90;
 const ANALYSIS_FRAME_BYTES: usize = ANALYSIS_WIDTH * ANALYSIS_HEIGHT * 3;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileState {
+    pub file_size: i64,
+    pub modified_at: i64,
+}
+
+pub fn file_state(path: &Path) -> Result<FileState> {
+    let metadata =
+        std::fs::metadata(path).with_context(|| format!("read metadata for {}", path.display()))?;
+    let modified_at = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_secs() as i64)
+        .unwrap_or(0);
+    Ok(FileState {
+        file_size: metadata.len() as i64,
+        modified_at,
+    })
+}
+
 pub fn discover(root: &Path, recursive: bool) -> Result<Vec<PathBuf>> {
     let depth = if recursive { usize::MAX } else { 1 };
     let mut videos = WalkDir::new(root)
@@ -37,14 +58,7 @@ pub fn discover(root: &Path, recursive: bool) -> Result<Vec<PathBuf>> {
 }
 
 pub async fn inspect(path: &Path, ffprobe: Option<&Path>) -> Result<DiscoveredFile> {
-    let metadata =
-        std::fs::metadata(path).with_context(|| format!("read metadata for {}", path.display()))?;
-    let modified_at = metadata
-        .modified()
-        .ok()
-        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
-        .map(|v| v.as_secs() as i64)
-        .unwrap_or(0);
+    let state = file_state(path)?;
     let technical = match ffprobe {
         Some(executable) => probe(executable, path).await.unwrap_or_default(),
         None => MediaTechnical::default(),
@@ -56,10 +70,10 @@ pub async fn inspect(path: &Path, ffprobe: Option<&Path>) -> Result<DiscoveredFi
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_owned(),
-        file_size: metadata.len() as i64,
-        modified_at,
-        fingerprint: fingerprint(path, metadata.len(), modified_at)
-            .unwrap_or_else(|_| format!("{}:{modified_at}", metadata.len())),
+        file_size: state.file_size,
+        modified_at: state.modified_at,
+        fingerprint: fingerprint(path, state.file_size as u64, state.modified_at)
+            .unwrap_or_else(|_| format!("{}:{}", state.file_size, state.modified_at)),
         parsed: parse_media_name(path),
         technical,
         external_subtitles: find_external_subtitles(path),

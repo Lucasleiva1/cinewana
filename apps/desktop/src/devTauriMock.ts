@@ -52,9 +52,9 @@ const episodes = [
 ];
 
 const series: SeriesSummary[] = [
-  { episodeId:'episode-dragon-1', title:'La Casa Del Dragon', seasons:1, episodes:2, latestAddedAt:now },
-  { episodeId:'episode-last-1', title:'The Last Of Us', seasons:1, episodes:3, latestAddedAt:now },
-  { episodeId:'episode-bear-1', title:'The Bear', seasons:1, episodes:4, latestAddedAt:now }
+  { episodeId:'episode-dragon-1', title:'La Casa Del Dragon', seasons:1, episodes:1, latestAddedAt:now, seasonItems:[{seasonNumber:1,title:'Temporada 1',episodes:[episodes[0]]}] },
+  { episodeId:'episode-last-1', title:'The Last Of Us', seasons:1, episodes:1, latestAddedAt:now, seasonItems:[{seasonNumber:1,title:'Temporada 1',episodes:[episodes[1]]}] },
+  { episodeId:'episode-bear-1', title:'The Bear', seasons:1, episodes:1, latestAddedAt:now, seasonItems:[{seasonNumber:1,title:'Temporada 1',episodes:[episodes[2]]}] }
 ];
 
 const home: HomeDto = {
@@ -90,7 +90,8 @@ const boot: Bootstrap = {
   accounts:[{ id:'account-1', name:'lucas' }],
   activeAccount:{ id:'account-1', name:'lucas' },
   ffprobeAvailable:true,
-  playerAvailable:true
+  playerAvailable:true,
+  identificationReviews:[]
 };
 
 const imageAnalysis: ImageAnalysis = {
@@ -119,12 +120,16 @@ export function installDevTauriMock() {
       }
       case 'technical_path':
         return 'D:\\peliculas-y-series\\sample.mp4';
+      case 'rescan_media_item':
+        return false;
       case 'analyze_media_image':
         return imageAnalysis;
       case 'start_scan':
       case 'cancel_scan':
         return scan;
       case 'set_media_flag':
+      case 'resolve_identification':
+      case 'reveal_media_file':
       case 'save_progress':
       case 'logout_account':
         return null;
