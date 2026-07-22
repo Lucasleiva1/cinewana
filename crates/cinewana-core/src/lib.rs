@@ -388,7 +388,28 @@ pub fn parse_media_name(path: &Path) -> ParsedMediaName {
         .and_then(|s| s.to_str())
         .unwrap_or_default();
     let normalized = stem.replace(['.', '_'], " ");
+    let forced_container = infer_forced_media_container(path);
+    if forced_container == Some(ForcedMediaContainer::Movies) {
+        let year = extract_year(&normalized);
+        let before_year = year
+            .and_then(|year| normalized.split(&year.to_string()).next())
+            .unwrap_or(&normalized);
+        return ParsedMediaName {
+            kind: MediaKind::Movie,
+            title: clean_title(before_year),
+            year,
+            series_title: None,
+            season_number: None,
+            episode_number: None,
+            identification_source: "movie_container".into(),
+            needs_review: false,
+            review_reason: None,
+        };
+    }
     let folder_context = infer_series_folder_context(path);
+    let forced_series_context = (forced_container == Some(ForcedMediaContainer::Series))
+        .then(|| infer_forced_series_context(path))
+        .flatten();
     let episode_re = Regex::new(
         r"(?i)^(?P<series>.*?)[\s.-]*(?:S(?P<s>\d{1,2})E(?P<e>\d{1,3})|(?P<s2>\d{1,2})x(?P<e2>\d{1,3})|(?:temporada|season)\s*0?(?P<s3>\d{1,2})[\s.-]*(?:episodio|episode|ep|cap(?:itulo|.tulo)?|chapter)\s*0?(?P<e3>\d{1,3}))(?:\b|[\s._-])",
     )
@@ -412,7 +433,12 @@ pub fn parse_media_name(path: &Path) -> ParsedMediaName {
                 && !context.series_title.eq_ignore_ascii_case(&parsed_series))
                 || parsed_season.is_some_and(|season| season != context.season_number)
         });
-        let missing_series = parsed_series.starts_with("Sin t") && folder_context.is_none();
+        let missing_series = parsed_series.starts_with("Sin t")
+            && folder_context.is_none()
+            && forced_series_context
+                .as_ref()
+                .and_then(|context| context.series_title.as_ref())
+                .is_none();
         let (series, season, source) = folder_context
             .as_ref()
             .map(|context| {
@@ -421,6 +447,18 @@ pub fn parse_media_name(path: &Path) -> ParsedMediaName {
                     Some(context.season_number),
                     "folder_and_filename".to_string(),
                 )
+            })
+            .or_else(|| {
+                forced_series_context.as_ref().map(|context| {
+                    (
+                        context
+                            .series_title
+                            .clone()
+                            .unwrap_or_else(|| parsed_series.clone()),
+                        Some(context.season_number),
+                        "series_container_and_filename".to_string(),
+                    )
+                })
             })
             .unwrap_or((parsed_series, parsed_season, "filename".to_string()));
         return ParsedMediaName {
@@ -460,6 +498,51 @@ pub fn parse_media_name(path: &Path) -> ParsedMediaName {
             };
         }
     }
+    if let Some(context) = forced_series_context.as_ref() {
+        if let Some((episode, marker_start, marker_end)) =
+            extract_forced_episode_number(&normalized)
+        {
+            let derived_series = derive_forced_series_title(&normalized[..marker_start]);
+            let series_title = context.series_title.clone().or(derived_series);
+            let missing_series = series_title.is_none();
+            return ParsedMediaName {
+                kind: MediaKind::Episode,
+                title: episode_title(&normalized[marker_end..], Some(episode)),
+                year: extract_year(&normalized),
+                series_title: Some(series_title.unwrap_or_else(|| "Sin título".into())),
+                season_number: Some(context.season_number),
+                episode_number: Some(episode),
+                identification_source: "series_container_and_filename".into(),
+                needs_review: missing_series,
+                review_reason: missing_series.then(|| {
+                    "La carpeta Serie fuerza un episodio, pero falta el nombre de la serie".into()
+                }),
+            };
+        }
+
+        let series_title = context
+            .series_title
+            .clone()
+            .or_else(|| derive_forced_series_title(&normalized));
+        let missing_series = series_title.is_none();
+        return ParsedMediaName {
+            kind: MediaKind::Episode,
+            title: clean_title(&normalized),
+            year: extract_year(&normalized),
+            series_title: Some(series_title.unwrap_or_else(|| "Sin título".into())),
+            season_number: Some(context.season_number),
+            episode_number: None,
+            identification_source: "series_container".into(),
+            needs_review: true,
+            review_reason: Some(if missing_series {
+                "La carpeta Serie fuerza una serie, pero faltan el nombre y el número de episodio"
+                    .into()
+            } else {
+                "La carpeta Serie fuerza una serie, pero no se encontró el número de episodio"
+                    .into()
+            }),
+        };
+    }
     let year = extract_year(&normalized);
     let before_year = if let Some(year) = year {
         normalized
@@ -494,6 +577,92 @@ struct SeriesFolderContext {
     season_number: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForcedMediaContainer {
+    Series,
+    Movies,
+}
+
+fn infer_forced_media_container(path: &Path) -> Option<ForcedMediaContainer> {
+    path.ancestors()
+        .skip(1)
+        .filter_map(|folder| folder.file_name().and_then(|value| value.to_str()))
+        .find_map(|name| {
+            if is_series_container_name(name) {
+                Some(ForcedMediaContainer::Series)
+            } else if is_movie_container_name(name) {
+                Some(ForcedMediaContainer::Movies)
+            } else {
+                None
+            }
+        })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ForcedSeriesContext {
+    series_title: Option<String>,
+    season_number: i32,
+}
+
+fn infer_forced_series_context(path: &Path) -> Option<ForcedSeriesContext> {
+    let folders = path
+        .ancestors()
+        .skip(1)
+        .filter_map(|folder| {
+            folder
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(|name| (folder, name))
+        })
+        .collect::<Vec<_>>();
+    let container_index = folders
+        .iter()
+        .position(|(_, name)| is_series_container_name(name))?;
+    let below_container = &folders[..container_index];
+    let season = below_container
+        .iter()
+        .enumerate()
+        .find_map(|(index, (_, name))| {
+            parse_season_folder_number(name).map(|number| (index, number))
+        });
+    let season_number = season.map(|(_, number)| number).unwrap_or(1);
+    let series_folder = if let Some((season_index, _)) = season {
+        below_container
+            .iter()
+            .skip(season_index + 1)
+            .find(|(_, name)| parse_season_folder_number(name).is_none())
+    } else {
+        below_container.first()
+    };
+    let series_title = series_folder
+        .map(|(_, name)| clean_context_title(name))
+        .filter(|title| !title.starts_with("Sin t"));
+
+    Some(ForcedSeriesContext {
+        series_title,
+        season_number,
+    })
+}
+
+fn is_series_container_name(value: &str) -> bool {
+    matches!(value.trim().to_lowercase().as_str(), "serie" | "series")
+}
+
+fn is_movie_container_name(value: &str) -> bool {
+    matches!(
+        value.trim().to_lowercase().as_str(),
+        "película" | "películas" | "pelicula" | "peliculas"
+    )
+}
+
+fn parse_season_folder_number(value: &str) -> Option<i32> {
+    Regex::new(r"(?i)^(?:temporada|season|s)\s*0?(?P<s>\d{1,2})(?:$|[\s._-])")
+        .unwrap()
+        .captures(&value.replace(['.', '_'], " "))
+        .and_then(|caps| caps.name("s"))
+        .and_then(|number| number.as_str().parse().ok())
+}
+
 fn infer_series_folder_context(path: &Path) -> Option<SeriesFolderContext> {
     let season_re = Regex::new(
         r"(?i)^(?P<series>.*?)(?:[\s._-]*(?:temporada|season)\s*0?(?P<s>\d{1,2})|[\s._-]+S\s*0?(?P<s2>\d{1,2}))(?:\b|[\s._-])",
@@ -519,6 +688,7 @@ fn infer_series_folder_context(path: &Path) -> Option<SeriesFolderContext> {
                 .parent()
                 .and_then(Path::file_name)
                 .and_then(|value| value.to_str())
+                .filter(|value| !is_series_container_name(value))
                 .map(clean_context_title)
                 .filter(|value| !value.starts_with("Sin t"))
         })?;
@@ -528,6 +698,37 @@ fn infer_series_folder_context(path: &Path) -> Option<SeriesFolderContext> {
         });
     }
     None
+}
+
+fn extract_forced_episode_number(value: &str) -> Option<(i32, usize, usize)> {
+    let labelled = Regex::new(
+        r"(?i)\b(?:episodio|episode|ep|e|cap(?:itulo|.tulo)?|chapter)\s*0?(?P<e>\d{1,3})\b",
+    )
+    .unwrap();
+    if let Some(caps) = labelled.captures(value) {
+        let marker = caps.get(0)?;
+        return Some((
+            caps.name("e")?.as_str().parse().ok()?,
+            marker.start(),
+            marker.end(),
+        ));
+    }
+    if let Some((episode, marker_end)) = extract_episode_number(value) {
+        return Some((episode, 0, marker_end));
+    }
+    let standalone = Regex::new(r"\b0?(?P<e>\d{1,3})\b").unwrap();
+    let caps = standalone.captures_iter(value).last()?;
+    let marker = caps.get(0)?;
+    Some((
+        caps.name("e")?.as_str().parse().ok()?,
+        marker.start(),
+        marker.end(),
+    ))
+}
+
+fn derive_forced_series_title(value: &str) -> Option<String> {
+    let title = clean_context_title(value);
+    (!title.starts_with("Sin t")).then_some(title)
 }
 
 fn extract_episode_number(value: &str) -> Option<(i32, usize)> {
@@ -645,5 +846,87 @@ mod tests {
         assert_eq!(parsed.kind, MediaKind::Movie);
         assert!(parsed.needs_review);
         assert!(parsed.review_reason.is_some());
+    }
+
+    #[test]
+    fn series_container_forces_a_named_file_to_be_an_episode() {
+        let parsed = parse_media_name(Path::new(
+            r"D:\media\Serie\Mi Anime\Temporada 1\Mi Anime 1.mkv",
+        ));
+
+        assert_eq!(parsed.kind, MediaKind::Episode);
+        assert_eq!(parsed.series_title.as_deref(), Some("Mi Anime"));
+        assert_eq!(parsed.season_number, Some(1));
+        assert_eq!(parsed.episode_number, Some(1));
+        assert_eq!(parsed.title, "Episodio 1");
+        assert!(!parsed.needs_review);
+    }
+
+    #[test]
+    fn series_container_accepts_plural_name_and_embedded_episode_number() {
+        let parsed = parse_media_name(Path::new(
+            r"D:\media\SERIES\Frieren\Season 2\Frieren aventura 12 final.mkv",
+        ));
+
+        assert_eq!(parsed.kind, MediaKind::Episode);
+        assert_eq!(parsed.series_title.as_deref(), Some("Frieren"));
+        assert_eq!(parsed.season_number, Some(2));
+        assert_eq!(parsed.episode_number, Some(12));
+        assert_eq!(parsed.title, "final");
+        assert!(!parsed.needs_review);
+    }
+
+    #[test]
+    fn series_container_derives_title_when_the_season_is_directly_inside_it() {
+        let parsed = parse_media_name(Path::new(r"D:\media\Serie\Temporada 3\Dungeon Meshi 4.mkv"));
+
+        assert_eq!(parsed.kind, MediaKind::Episode);
+        assert_eq!(parsed.series_title.as_deref(), Some("Dungeon Meshi"));
+        assert_eq!(parsed.season_number, Some(3));
+        assert_eq!(parsed.episode_number, Some(4));
+        assert!(!parsed.needs_review);
+    }
+
+    #[test]
+    fn series_container_never_falls_back_to_movie_when_episode_is_unclear() {
+        let parsed = parse_media_name(Path::new(r"D:\media\Serie\Mi Anime\archivo sin numero.mkv"));
+
+        assert_eq!(parsed.kind, MediaKind::Episode);
+        assert_eq!(parsed.series_title.as_deref(), Some("Mi Anime"));
+        assert_eq!(parsed.season_number, Some(1));
+        assert_eq!(parsed.episode_number, None);
+        assert!(parsed.needs_review);
+    }
+
+    #[test]
+    fn numbered_file_outside_series_container_remains_a_movie() {
+        let parsed = parse_media_name(Path::new(r"D:\media\Mi Anime 1.mkv"));
+
+        assert_eq!(parsed.kind, MediaKind::Movie);
+    }
+
+    #[test]
+    fn uppercase_accented_movies_container_forces_movie_classification() {
+        let parsed = parse_media_name(Path::new(
+            r"D:\media\PELÍCULAS\Una Pelicula S01E01 2025.mkv",
+        ));
+
+        assert_eq!(parsed.kind, MediaKind::Movie);
+        assert_eq!(parsed.title, "Una Pelicula S01E01");
+        assert_eq!(parsed.year, Some(2025));
+        assert_eq!(parsed.series_title, None);
+        assert_eq!(parsed.season_number, None);
+        assert_eq!(parsed.episode_number, None);
+        assert_eq!(parsed.identification_source, "movie_container");
+        assert!(!parsed.needs_review);
+    }
+
+    #[test]
+    fn movies_container_also_accepts_name_without_accent() {
+        let parsed = parse_media_name(Path::new(r"D:\media\PELICULAS\Alien.2.El.Regreso.1986.mkv"));
+
+        assert_eq!(parsed.kind, MediaKind::Movie);
+        assert_eq!(parsed.title, "Alien 2 El Regreso");
+        assert_eq!(parsed.year, Some(1986));
     }
 }

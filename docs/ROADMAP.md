@@ -69,6 +69,8 @@
 ## Implemented for resilient series identification
 
 - Series scanning now combines the video filename with `Serie / Temporada` folder context instead of requiring a perfect `SxxExx` filename
+- Any video below an exact `SERIE` or `SERIES` container is forced to series classification; season folders set the season and simple embedded numbers identify episodes
+- Any video below `PELÍCULAS` or `PELICULAS` is forced to movie classification, even when its filename resembles a television episode
 - Season folders accept `Temporada`, `Season`, and `Sxx`; episode files accept `SxxExx`, `1x01`, `Episodio`, `Episode`, `Capitulo`, `Chapter`, and leading episode numbers
 - Folder context has priority when a localized series folder conflicts with a filename, while the contradiction is sent to a review queue
 - Settings now includes an identification review queue for confirming a movie or manually assigning series, season, episode, and episode title
@@ -93,6 +95,7 @@
 
 - Prepared version 0.2.1 as the installable Windows x64 test update that exposes **Configuración → Control remoto** in the desktop application
 - Prepared version 0.3.0-rc.1 as the important pre-final updater release for resilient series identification, targeted rescans, daily discovery rotation, and the local remote-control PWA
+- Prepared version 0.3.1 as the signed pre-final updater release that makes `SERIES` and `PELÍCULAS` explicit, mandatory classification containers
 - Windows-hosted HTTP/WebSocket service for same-Wi-Fi control
 - QR and manual-URL pairing with approved, revocable device tokens
 - Mobile web remote for the internal player and existing library actions

@@ -2173,4 +2173,80 @@ mod tests {
         assert_eq!(home.series.len(), 1);
         assert_eq!(home.series[0].season_items[0].episodes[0].id, item.id);
     }
+
+    #[test]
+    fn rescan_reclassifies_an_existing_movie_inside_uppercase_series_container() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        let path = r"D:\media\SERIES\Frieren\Temporada 1\Frieren 1.mkv";
+        let mut file = discovered_file(path, "series-container");
+        file.parsed = ParsedMediaName {
+            kind: MediaKind::Movie,
+            title: "Frieren 1".into(),
+            year: None,
+            series_title: None,
+            season_number: None,
+            episode_number: None,
+            identification_source: "filename".into(),
+            needs_review: false,
+            review_reason: None,
+        };
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        let original = db.upsert_file(&root, "scan-1", &file).unwrap();
+
+        db.reconcile_unchanged_file("scan-2", path, 10, 1, &parse_media_name(Path::new(path)))
+            .unwrap()
+            .unwrap();
+
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        let item = db
+            .catalog(Some(&account.id), &CatalogQuery::default())
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(item.id, original.media_id);
+        assert_eq!(item.kind, MediaKind::Episode);
+        assert_eq!(item.series_title.as_deref(), Some("Frieren"));
+        assert_eq!(item.season_number, Some(1));
+        assert_eq!(item.episode_number, Some(1));
+    }
+
+    #[test]
+    fn rescan_reclassifies_an_existing_episode_inside_uppercase_movies_container() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        let path = r"D:\media\PELÍCULAS\Una Pelicula S01E01 2025.mkv";
+        let mut file = discovered_file(path, "movies-container");
+        file.parsed = ParsedMediaName {
+            kind: MediaKind::Episode,
+            title: "Episodio 1".into(),
+            year: Some(2025),
+            series_title: Some("Una Pelicula".into()),
+            season_number: Some(1),
+            episode_number: Some(1),
+            identification_source: "filename".into(),
+            needs_review: false,
+            review_reason: None,
+        };
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        let original = db.upsert_file(&root, "scan-1", &file).unwrap();
+
+        db.reconcile_unchanged_file("scan-2", path, 10, 1, &parse_media_name(Path::new(path)))
+            .unwrap()
+            .unwrap();
+
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        let item = db
+            .catalog(Some(&account.id), &CatalogQuery::default())
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(item.id, original.media_id);
+        assert_eq!(item.kind, MediaKind::Movie);
+        assert_eq!(item.title, "Una Pelicula S01E01");
+        assert_eq!(item.year, Some(2025));
+        assert_eq!(item.series_title, None);
+        assert_eq!(item.season_number, None);
+        assert_eq!(item.episode_number, None);
+    }
 }
