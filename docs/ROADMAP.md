@@ -10,6 +10,7 @@
 
 ## Implemented after the first visual review
 
+- Joined the two-color CINE/WANA wordmark without a visual gap across desktop, account access, compact layouts, and the remote control
 - Installed FFmpeg/ffprobe 8.1.2 and mpv 0.41.0 for development
 - Cached real poster crops, cinematic backdrops, and eight-second preview clips generated from each local video
 - Asset-protocol delivery restricted to the application cache
@@ -30,9 +31,10 @@
 - Added non-destructive image scanning and runtime adjustments for brightness, contrast, saturation, shadows, highlights, and temperature
 - Moved internal-player image scanning to Rust/FFmpeg so scene, light, and color analysis works with local Tauri media URLs without browser canvas security errors
 - Image scanning now pauses playback, reports live scan progress, and resumes from the original playback position when finished
+- Opening Image now starts its scan automatically from both the desktop player and the local-network remote control
 - Reworked shadows/highlights adjustment as a tonal curve so shadow correction no longer washes the whole frame white
 - Added automatic numbered movie-sequel handoff for local sagas, with a cancellable next-up prompt near the end of playback
-- Replaced the early eight-second handoff with a real 30-second end-of-video countdown: cancelling stops autoplay but keeps a working manual next button
+- The next-content offer now appears during the final 60 seconds with explicit **Play now** and **Cancel** actions on both desktop and remote; cancellation hides the offer and disables autoplay
 - Series now advance to the next numbered episode across seasons, while movies recommend a genre/year-related title with no progress in the active account
 - Prepared version 0.2.0 as an important signed updater release for the internal-player image correction workflow
 
@@ -99,6 +101,7 @@
 - Prepared version 0.3.0-rc.1 as the important pre-final updater release for resilient series identification, targeted rescans, daily discovery rotation, and the local remote-control PWA
 - Prepared version 0.3.1 as the signed pre-final updater release that makes `SERIES` and `PELÍCULAS` explicit, mandatory classification containers
 - Prepared version 0.3.2 as the signed pre-final updater release for cancellable next-episode and unwatched-movie handoff
+- Prepared version 0.3.3 as the signed updater release for automatic image analysis, immediate/cancellable 60-second next-content handoff on desktop and remote, and the joined two-color wordmark
 - Windows-hosted HTTP/WebSocket service for same-Wi-Fi control
 - QR and manual-URL pairing with approved, revocable device tokens
 - Mobile web remote for the internal player and existing library actions

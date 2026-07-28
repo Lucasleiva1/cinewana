@@ -54,6 +54,9 @@ pub struct RemotePlayerSnapshot {
     pub volume: f64,
     pub muted: bool,
     pub fullscreen: bool,
+    pub image_analyzing: bool,
+    pub image_analysis_percent: f64,
+    pub next_up: Option<RemoteNextUp>,
     pub image_settings: Vec<RemoteImageSetting>,
     pub audio_tracks: Vec<RemoteTrack>,
     pub subtitle_tracks: Vec<RemoteTrack>,
@@ -69,6 +72,16 @@ pub struct RemoteImageSetting {
     pub max: f64,
     pub step: f64,
     pub default_value: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteNextUp {
+    pub id: String,
+    pub title: String,
+    pub label: String,
+    pub position: Option<String>,
+    pub seconds_remaining: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +109,9 @@ pub enum RemoteCommand {
     },
     PlayerToggleMute,
     PlayerToggleFullscreen,
+    PlayerStartNextUp,
+    PlayerCancelNextUp,
+    PlayerAnalyzeImage,
     PlayerSetImage {
         setting_id: String,
         value: f64,

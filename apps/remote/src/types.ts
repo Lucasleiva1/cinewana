@@ -6,10 +6,13 @@ export interface ImageSetting {
 }
 
 export interface Track { id: string; label: string; language?: string; channels?: number; active: boolean }
+export interface NextUp { id: string; title: string; label: string; position?: string; secondsRemaining: number }
 
 export interface PlayerSnapshot {
   active: boolean; mediaId?: string; title?: string; year?: number; quality?: string;
   positionSeconds: number; durationSeconds: number; playing: boolean; volume: number; muted: boolean; fullscreen: boolean;
+  imageAnalyzing: boolean; imageAnalysisPercent: number;
+  nextUp?: NextUp | null;
   imageSettings: ImageSetting[]; audioTracks: Track[]; subtitleTracks: Track[];
 }
 
@@ -36,6 +39,9 @@ export type RemoteCommand =
   | { type: 'player_set_volume'; volume: number }
   | { type: 'player_toggle_mute' }
   | { type: 'player_toggle_fullscreen' }
+  | { type: 'player_start_next_up' }
+  | { type: 'player_cancel_next_up' }
+  | { type: 'player_analyze_image' }
   | { type: 'player_set_image'; setting_id: string; value: number }
   | { type: 'player_reset_image' }
   | { type: 'player_set_audio'; track_id: string }

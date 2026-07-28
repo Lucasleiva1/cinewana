@@ -1,4 +1,4 @@
-export const NEXT_UP_LEAD_SECONDS = 30;
+export const NEXT_UP_LEAD_SECONDS = 60;
 
 export function nextUpSecondsRemaining(current: number, duration: number) {
   if (!Number.isFinite(current) || !Number.isFinite(duration) || duration <= 0) return 0;

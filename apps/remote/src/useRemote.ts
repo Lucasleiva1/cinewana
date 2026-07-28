@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ConnectionState, MediaDetail, MediaItem, PlayerSnapshot, RemoteCommand, SeriesItem, StoredCredentials } from './types';
 
 const CREDENTIALS_KEY = 'cine-wana.remote-device.v1';
-const emptyPlayer: PlayerSnapshot = { active:false,positionSeconds:0,durationSeconds:0,playing:false,volume:0.8,muted:false,fullscreen:false,imageSettings:[],audioTracks:[],subtitleTracks:[] };
+const emptyPlayer: PlayerSnapshot = { active:false,positionSeconds:0,durationSeconds:0,playing:false,volume:0.8,muted:false,fullscreen:false,imageAnalyzing:false,imageAnalysisPercent:0,nextUp:null,imageSettings:[],audioTracks:[],subtitleTracks:[] };
 
 function loadCredentials(): StoredCredentials | null {
   try { return JSON.parse(localStorage.getItem(CREDENTIALS_KEY) || 'null') as StoredCredentials | null; } catch { return null; }

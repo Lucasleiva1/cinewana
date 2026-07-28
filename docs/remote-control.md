@@ -43,7 +43,8 @@ Para quitar acceso, abrir **Dispositivos vinculados** y presionar **Desvincular*
 - buscar una posición;
 - volumen y mute;
 - pantalla completa;
-- seis controles reales de imagen y restablecimiento;
+- escaneo automático al abrir Imagen, seis controles reales de imagen y restablecimiento;
+- aviso de siguiente contenido durante el último minuto, con reproducción inmediata o cancelación real;
 - catálogo táctil de películas, series agrupadas por temporada y Mi lista;
 - orden diario de películas sincronizado con Inicio, manteniendo las agregadas recientemente en orden cronológico;
 - episodios con miniatura disponible, descripción, ficha y reproducción en la computadora;

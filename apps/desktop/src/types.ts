@@ -49,15 +49,19 @@ export interface RemoteStatus {
 
 export interface RemoteImageSetting { id:string; label:string; value:number; min:number; max:number; step:number; defaultValue:number }
 export interface RemoteTrack { id:string; label:string; language?:string|null; channels?:number|null; active:boolean }
+export interface RemoteNextUp { id:string; title:string; label:string; position?:string|null; secondsRemaining:number }
 export interface RemotePlayerSnapshot {
   active:boolean; mediaId?:string|null; title?:string|null; year?:number|null; quality?:string|null;
   positionSeconds:number; durationSeconds:number; playing:boolean; volume:number; muted:boolean; fullscreen:boolean;
+  imageAnalyzing:boolean; imageAnalysisPercent:number;
+  nextUp?:RemoteNextUp|null;
   imageSettings:RemoteImageSetting[]; audioTracks:RemoteTrack[]; subtitleTracks:RemoteTrack[];
 }
 
 export type RemoteCommand =
   | {type:'player_toggle'} | {type:'player_seek_by';seconds:number} | {type:'player_seek_to';seconds:number}
   | {type:'player_set_volume';volume:number} | {type:'player_toggle_mute'} | {type:'player_toggle_fullscreen'}
-  | {type:'player_set_image';setting_id:string;value:number} | {type:'player_reset_image'}
+  | {type:'player_start_next_up'} | {type:'player_cancel_next_up'}
+  | {type:'player_analyze_image'} | {type:'player_set_image';setting_id:string;value:number} | {type:'player_reset_image'}
   | {type:'player_set_audio';track_id:string} | {type:'player_set_subtitle';track_id:string|null}
   | {type:'library_play_media';media_id:string} | {type:'navigate';direction:string} | {type:'navigate_back'};

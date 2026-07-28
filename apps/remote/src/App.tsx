@@ -38,6 +38,7 @@ export function App(){
   const openDetail=async(item:MediaItem)=>{setDetailLoading(true);try{setDetail(await remote.loadDetail(item.id));}catch(cause){remote.setError(String(cause));}finally{setDetailLoading(false);}};
   const play=(id:string)=>{if(remote.send({type:'library_play_media',media_id:id})){setDetail(null);setSelectedSeries(null);}};
   const openEpisodeDetail=(item:MediaItem)=>{setSelectedSeries(null);void openDetail(item);};
+  const openImage=()=>{setSheet('image');remote.send({type:'player_analyze_image'});};
 
   if(remote.connection==='unpaired')return <PairScreen error={remote.error} retry={remote.retry}/>;
   if(remote.connection==='pairing')return <PairingScreen pending={Boolean(remote.pairRequestId)} error={remote.error}/>;
@@ -47,7 +48,7 @@ export function App(){
     {remote.error&&<div className="inline-error"><WifiOff/><span>{remote.error}</span><button onClick={()=>remote.setError(null)}><X/></button></div>}
     <main>
       {view==='home'?<>
-        <NowPlaying player={player} send={remote.send} openSheet={setSheet}/>
+        <NowPlaying player={player} send={remote.send} openSheet={setSheet} openImage={openImage}/>
         {homeRows.map(([title,items])=>items.length?<MediaRow key={title} title={title} items={items.slice(0,18)} openDetail={openDetail} loadArtwork={remote.loadArtwork}/>:null)}
         {remote.series.length>0&&<SeriesRow title="Series" items={remote.series} openSeries={setSelectedSeries} loadArtwork={remote.loadArtwork}/>}
       </>:<section className="library-view">
@@ -60,7 +61,7 @@ export function App(){
     {detailLoading&&<div className="loading-float"><LoaderCircle className="spin"/></div>}
     {selectedSeries&&<SeriesSheet key={selectedSeries.title} series={selectedSeries} close={()=>setSelectedSeries(null)} play={play} openDetail={openEpisodeDetail} loadArtwork={remote.loadArtwork} loadBackdrop={remote.loadBackdrop}/>}
     {detail&&<DetailSheet detail={detail} close={()=>setDetail(null)} play={play} send={remote.send} loadArtwork={remote.loadArtwork}/>}
-    {sheet==='image'&&<ImageSheet settings={player.imageSettings} close={()=>setSheet(null)} send={remote.send}/>}
+    {sheet==='image'&&<ImageSheet settings={player.imageSettings} analyzing={player.imageAnalyzing} percent={player.imageAnalysisPercent} close={()=>setSheet(null)} send={remote.send}/>}
     {sheet==='audio'&&<TrackSheet title="Audio" tracks={player.audioTracks} close={()=>setSheet(null)} select={id=>id&&remote.send({type:'player_set_audio',track_id:id})}/>}
     {sheet==='subtitle'&&<TrackSheet title="Subtítulos" tracks={player.subtitleTracks} allowOff close={()=>setSheet(null)} select={id=>remote.send({type:'player_set_subtitle',track_id:id})}/>}
   </div>;
@@ -72,19 +73,20 @@ function ConnectionPill({state}:{state:string}){const online=state==='connected'
 function PairScreen({error,retry}:{error:string|null;retry:()=>void}){return <main className="pair-screen"><Brand/><div className="pair-orbit"><Smartphone/><i/><i/></div><span className="eyebrow">CONTROL REMOTO LOCAL</span><h1>Vinculá este teléfono</h1><p>En la computadora abrí <b>Configuración → Control remoto</b>, activá el servidor y escaneá el QR.</p>{error&&<div className="pair-error">{error}</div>}<button className="primary wide" onClick={retry}><RotateCcw/>Reintentar</button><small>El teléfono y la computadora deben estar en la misma red Wi‑Fi.</small></main>}
 function PairingScreen({pending,error}:{pending:boolean;error:string|null}){return <main className="pair-screen"><Brand/><LoaderCircle className="pair-loader spin"/><span className="eyebrow">VINCULACIÓN SEGURA</span><h1>{pending?'Aprobá este teléfono':'Conectando…'}</h1><p>{pending?'Mirá CINE WANA en la computadora y presioná Aprobar en la solicitud pendiente.':'Estamos verificando el código temporal.'}</p>{error&&<div className="pair-error">{error}</div>}<small>No cierres esta pantalla.</small></main>}
 
-function NowPlaying({player,send,openSheet}:{player:ReturnType<typeof useRemote>['player'];send:ReturnType<typeof useRemote>['send'];openSheet:(sheet:'image'|'audio'|'subtitle')=>void}){
+function NowPlaying({player,send,openSheet,openImage}:{player:ReturnType<typeof useRemote>['player'];send:ReturnType<typeof useRemote>['send'];openSheet:(sheet:'image'|'audio'|'subtitle')=>void;openImage:()=>void}){
   if(!player.active)return <section className="now-playing empty"><span className="eyebrow">REPRODUCTOR</span><div><Film/><h1>No hay nada reproduciéndose</h1><p>Elegí una película o serie desde el teléfono para verla en la computadora.</p></div></section>;
   const percent=player.durationSeconds?player.positionSeconds/player.durationSeconds*100:0;
   return <section className="now-playing">
     <span className="eyebrow">REPRODUCIENDO AHORA</span>
     <div className="title-line"><div><h1>{player.title}</h1><p>{[player.year,player.quality].filter(Boolean).join(' · ')}</p></div></div>
+    {player.nextUp&&<div className="remote-next-up"><div><span>{player.nextUp.label}</span><b>{player.nextUp.title}</b><small>{player.nextUp.position?`${player.nextUp.position} · `:''}Empieza al terminar · {Math.ceil(player.nextUp.secondsRemaining)} s</small></div><div><button className="primary" onClick={()=>send({type:'player_start_next_up'})}><Play fill="currentColor"/>Reproducir ahora</button><button onClick={()=>send({type:'player_cancel_next_up'})}><X/>Cancelar</button></div></div>}
     <label className="progress"><span>{formatTime(player.positionSeconds)}</span><input aria-label="Posición" type="range" min={0} max={Math.max(player.durationSeconds,1)} step={1} value={Math.min(player.positionSeconds,player.durationSeconds||0)} onChange={event=>send({type:'player_seek_to',seconds:Number(event.target.value)})}/><span>{formatTime(player.durationSeconds)}</span><i style={{width:`${percent}%`}}/></label>
     <div className="transport"><button onClick={()=>send({type:'player_seek_by',seconds:-10})}><SkipBack/><small>10</small></button><button className="play" onClick={()=>send({type:'player_toggle'})}>{player.playing?<Pause fill="currentColor"/>:<Play fill="currentColor"/>}</button><button onClick={()=>send({type:'player_seek_by',seconds:10})}><SkipForward/><small>10</small></button></div>
     <div className="volume"><button onClick={()=>send({type:'player_toggle_mute'})}>{player.muted?<VolumeX/>:<Volume2/>}</button><input aria-label="Volumen" type="range" min={0} max={1} step={0.01} value={player.muted?0:player.volume} onChange={event=>send({type:'player_set_volume',volume:Number(event.target.value)})}/><span>{Math.round((player.muted?0:player.volume)*100)}</span></div>
     <div className="quick-controls">
       {player.subtitleTracks.length>0&&<button onClick={()=>openSheet('subtitle')}><span>CC</span>Subtítulos</button>}
       {player.audioTracks.length>0&&<button onClick={()=>openSheet('audio')}><Volume2/>Audio</button>}
-      {player.imageSettings.length>0&&<button onClick={()=>openSheet('image')}><ImageIcon/>Imagen</button>}
+      {player.imageSettings.length>0&&<button onClick={openImage}><ImageIcon/>Imagen</button>}
       <button onClick={()=>send({type:'player_toggle_fullscreen'})}><Expand/>Pantalla</button>
     </div>
   </section>;
@@ -115,7 +117,7 @@ function EpisodeRow({item,play,openDetail,loadArtwork,loadBackdrop}:{item:MediaI
 
 function DetailSheet({detail,close,play,send,loadArtwork}:{detail:MediaDetail;close:()=>void;play:(id:string)=>void;send:ReturnType<typeof useRemote>['send'];loadArtwork:(id:string)=>Promise<string|null>}){const src=useArtwork(detail,loadArtwork);return <Sheet close={close}><div className="detail-hero">{src?<img src={src} alt=""/>:<div>{initials(displayTitle(detail))}</div>}<div><span className="eyebrow">{detail.kind==='movie'?'PELÍCULA':'SERIE'}</span><h2>{displayTitle(detail)}</h2><p>{[detail.year,detail.quality,formatDuration(detail.runtimeMs||detail.durationMs)].filter(Boolean).join(' · ')}</p></div></div>{detail.genres.length>0&&<div className="chips">{detail.genres.map(genre=><span key={genre}>{genre}</span>)}</div>}<p className="overview">{detail.overview||'Sin sinopsis disponible.'}</p><div className="detail-actions"><button className="primary" onClick={()=>play(detail.id)}><Play fill="currentColor"/>Reproducir en la computadora</button><button onClick={()=>send({type:'library_set_flag',media_id:detail.id,flag:'watchlist',value:!detail.inWatchlist})}><Bookmark fill={detail.inWatchlist?'currentColor':'none'}/>{detail.inWatchlist?'Quitar de Mi lista':'Agregar a Mi lista'}</button><button onClick={()=>send({type:'library_set_flag',media_id:detail.id,flag:'favorite',value:!detail.favorite})}><Heart fill={detail.favorite?'currentColor':'none'}/>Favorito</button></div></Sheet>}
 
-function ImageSheet({settings,close,send}:{settings:ImageSetting[];close:()=>void;send:ReturnType<typeof useRemote>['send']}){return <Sheet close={close}><div className="sheet-heading"><div><span className="eyebrow">REPRODUCTOR</span><h2>Imagen</h2></div><button onClick={()=>send({type:'player_reset_image'})}><RotateCcw/>Restablecer</button></div><div className="image-settings">{settings.map(setting=><label key={setting.id}><span><b>{setting.label}</b><output>{Math.round(setting.value)}</output></span><input type="range" min={setting.min} max={setting.max} step={setting.step} value={setting.value} onChange={event=>send({type:'player_set_image',setting_id:setting.id,value:Number(event.target.value)})}/></label>)}</div></Sheet>}
+function ImageSheet({settings,analyzing,percent,close,send}:{settings:ImageSetting[];analyzing:boolean;percent:number;close:()=>void;send:ReturnType<typeof useRemote>['send']}){return <Sheet close={close}><div className="sheet-heading"><div><span className="eyebrow">REPRODUCTOR</span><h2>Imagen</h2></div><button onClick={()=>send({type:'player_reset_image'})}><RotateCcw/>Restablecer</button></div>{analyzing&&<div className="image-analysis-status"><LoaderCircle className="spin"/><span>Escaneando escenas en la computadora…</span><b>{Math.round(percent)}%</b></div>}<div className="image-settings">{settings.map(setting=><label key={setting.id}><span><b>{setting.label}</b><output>{Math.round(setting.value)}</output></span><input type="range" min={setting.min} max={setting.max} step={setting.step} value={setting.value} onChange={event=>send({type:'player_set_image',setting_id:setting.id,value:Number(event.target.value)})}/></label>)}</div></Sheet>}
 function TrackSheet({title,tracks,allowOff,close,select}:{title:string;tracks:Array<{id:string;label:string;language?:string;channels?:number;active:boolean}>;allowOff?:boolean;close:()=>void;select:(id:string|null)=>void}){return <Sheet close={close}><div className="sheet-heading"><div><span className="eyebrow">REPRODUCTOR</span><h2>{title}</h2></div></div><div className="track-list">{allowOff&&<button onClick={()=>select(null)}><span>Sin subtítulos</span></button>}{tracks.map(track=><button key={track.id} className={track.active?'active':''} onClick={()=>select(track.id)}><span><b>{track.label}</b><small>{[track.language,track.channels?`${track.channels} canales`:null].filter(Boolean).join(' · ')}</small></span>{track.active&&<Check/>}</button>)}</div></Sheet>}
 function Sheet({children,close}:{children:React.ReactNode;close:()=>void}){return <div className="sheet-backdrop" onPointerDown={event=>{if(event.target===event.currentTarget)close();}}><section className="bottom-sheet"><button className="sheet-close" onClick={close}><X/></button><i className="sheet-handle"/>{children}</section></div>}
 

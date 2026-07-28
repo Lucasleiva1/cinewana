@@ -49,6 +49,7 @@ export function InternalPlayer({
   const initialWindowFullscreenRef = useRef<boolean | null>(null);
   const restoredRef = useRef(false);
   const nextStartingRef = useRef(false);
+  const imageAnalysisRunningRef = useRef(false);
   const [playing, setPlaying] = useState(true);
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(() => msToSeconds(source.detail.runtimeMs ?? source.detail.technical.durationMs ?? 0));
@@ -199,40 +200,6 @@ export function InternalPlayer({
   }, []);
 
   useEffect(() => {
-    let disposed = false;
-    let cleanup: (() => void) | undefined;
-    void listen<RemoteCommand>('remote-command', event => {
-      const command = event.payload;
-      const video = videoRef.current;
-      if (!video) return;
-      if (command.type === 'player_toggle') togglePlay();
-      if (command.type === 'player_seek_by') seekBy(command.seconds);
-      if (command.type === 'player_seek_to') {
-        video.currentTime = clamp(command.seconds, 0, video.duration || duration || 0);
-        setCurrent(video.currentTime);
-      }
-      if (command.type === 'player_set_volume') {
-        video.volume = clamp(command.volume, 0, 1);
-        video.muted = video.volume === 0;
-        setVolume(video.volume);
-        setMuted(video.muted);
-      }
-      if (command.type === 'player_toggle_mute') {
-        video.muted = !video.muted;
-        setMuted(video.muted);
-      }
-      if (command.type === 'player_toggle_fullscreen') toggleFullscreen();
-      if (command.type === 'player_set_image' && command.setting_id in defaultImage) {
-        setImage(previous => ({ ...previous, [command.setting_id]: clamp(command.value, -50, 50) }));
-      }
-      if (command.type === 'player_reset_image') setImage(defaultImage);
-    }).then(unlisten => {
-      if (disposed) unlisten(); else cleanup = unlisten;
-    });
-    return () => { disposed = true; cleanup?.(); };
-  }, [duration, seekBy, toggleFullscreen, togglePlay]);
-
-  useEffect(() => {
     const height = source.detail.technical.height;
     const quality = height ? (height >= 2160 ? '4K' : height >= 1080 ? '1080p' : height >= 720 ? '720p' : `${height}p`) : undefined;
     const labels: Record<keyof ImageSettings, string> = {
@@ -250,17 +217,27 @@ export function InternalPlayer({
       volume,
       muted,
       fullscreen,
+      imageAnalyzing: analyzing,
+      imageAnalysisPercent: analysisProgress?.percent ?? 0,
+      nextUp: nextUp && nextPromptVisible ? {
+        id: nextUp.id,
+        title: nextUp.title,
+        label: nextLabel,
+        position: nextPosition,
+        secondsRemaining: nextCountdown,
+      } : null,
       imageSettings: (Object.keys(image) as Array<keyof ImageSettings>).map(id => ({ id, label: labels[id], value: image[id], min: -50, max: 50, step: 1, defaultValue: 0 })),
       audioTracks: [],
       subtitleTracks: [],
     };
     void invoke('remote_update_player_state', { snapshot }).catch(() => {});
-  }, [current, duration, fullscreen, image, muted, playing, source.detail.id, source.detail.technical.height, source.detail.year, title, volume]);
+  }, [analysisProgress?.percent, analyzing, current, duration, fullscreen, image, muted, nextCountdown, nextLabel, nextPosition, nextPromptVisible, nextUp, playing, source.detail.id, source.detail.technical.height, source.detail.year, title, volume]);
 
   useEffect(() => () => {
     const snapshot: RemotePlayerSnapshot = {
       active: false, positionSeconds: 0, durationSeconds: 0, playing: false, volume: 0.8,
-      muted: false, fullscreen: false, imageSettings: [], audioTracks: [], subtitleTracks: [],
+      muted: false, fullscreen: false, imageAnalyzing: false, imageAnalysisPercent: 0,
+      nextUp: null, imageSettings: [], audioTracks: [], subtitleTracks: [],
     };
     void invoke('remote_update_player_state', { snapshot }).catch(() => {});
   }, []);
@@ -300,7 +277,8 @@ export function InternalPlayer({
   }, [nextUp, onPlayNext, saveProgress]);
 
   const analyzeImage = useCallback(async () => {
-    if (analyzing) return;
+    if (imageAnalysisRunningRef.current) return;
+    imageAnalysisRunningRef.current = true;
     const video = videoRef.current;
     const resumeAt = Number.isFinite(video?.currentTime) ? video!.currentTime : current;
     const shouldResume = video ? !video.paused : playing;
@@ -325,6 +303,7 @@ export function InternalPlayer({
     } catch (cause) {
       setError(`No se pudo analizar la imagen: ${String(cause)}`);
     } finally {
+      imageAnalysisRunningRef.current = false;
       setAnalyzing(false);
       setAnalysisProgress(null);
       if (video) {
@@ -340,7 +319,53 @@ export function InternalPlayer({
         }
       }
     }
-  }, [analyzing, current, playing, source.detail.id]);
+  }, [current, playing, source.detail.id]);
+
+  const toggleImagePanel = useCallback(() => {
+    if (showImagePanel) {
+      setShowImagePanel(false);
+      return;
+    }
+    setShowImagePanel(true);
+    void analyzeImage();
+  }, [analyzeImage, showImagePanel]);
+
+  useEffect(() => {
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void listen<RemoteCommand>('remote-command', event => {
+      const command = event.payload;
+      const video = videoRef.current;
+      if (!video) return;
+      if (command.type === 'player_toggle') togglePlay();
+      if (command.type === 'player_seek_by') seekBy(command.seconds);
+      if (command.type === 'player_seek_to') {
+        video.currentTime = clamp(command.seconds, 0, video.duration || duration || 0);
+        setCurrent(video.currentTime);
+      }
+      if (command.type === 'player_set_volume') {
+        video.volume = clamp(command.volume, 0, 1);
+        video.muted = video.volume === 0;
+        setVolume(video.volume);
+        setMuted(video.muted);
+      }
+      if (command.type === 'player_toggle_mute') {
+        video.muted = !video.muted;
+        setMuted(video.muted);
+      }
+      if (command.type === 'player_toggle_fullscreen') toggleFullscreen();
+      if (command.type === 'player_start_next_up') void startNextUp();
+      if (command.type === 'player_cancel_next_up') cancelNextPrompt();
+      if (command.type === 'player_analyze_image') void analyzeImage();
+      if (command.type === 'player_set_image' && command.setting_id in defaultImage) {
+        setImage(previous => ({ ...previous, [command.setting_id]: clamp(command.value, -50, 50) }));
+      }
+      if (command.type === 'player_reset_image') setImage(defaultImage);
+    }).then(unlisten => {
+      if (disposed) unlisten(); else cleanup = unlisten;
+    });
+    return () => { disposed = true; cleanup?.(); };
+  }, [analyzeImage, cancelNextPrompt, duration, seekBy, startNextUp, toggleFullscreen, togglePlay]);
 
   useEffect(() => {
     let cancelled = false;
@@ -559,15 +584,11 @@ export function InternalPlayer({
             <span>{nextPosition ? `${nextPosition} · ` : ''}Empieza al terminar · {Math.ceil(nextCountdown)} s</span>
             <div className="cw-next-meter"><i style={{ width: `${nextProgress * 100}%` }} /></div>
           </div>
-          <button onClick={cancelNextPrompt}>Cancelar</button>
+          <div className="cw-next-actions">
+            <button className="primary" onClick={() => void startNextUp()}><Play fill="currentColor" size={13}/>Reproducir ahora</button>
+            <button onClick={cancelNextPrompt}>Cancelar</button>
+          </div>
         </aside>
-      )}
-
-      {nextUp && nextDismissed && !nextPromptVisible && (
-        <button className="cw-next-manual" onClick={event => { event.stopPropagation(); void startNextUp(); }} onDoubleClick={event => event.stopPropagation()}>
-          <SkipForward size={18}/>
-          <span><small>{nextLabel}</small><b>{nextUp.title}</b></span>
-        </button>
       )}
 
       <div className="cw-player-top">
@@ -667,7 +688,7 @@ export function InternalPlayer({
               setVolume(next);
               setMuted(next === 0);
             }}/>
-            <button className={showImagePanel ? 'selected' : ''} onClick={() => setShowImagePanel(value => !value)}><SlidersHorizontal size={19}/><span>Imagen</span></button>
+            <button className={showImagePanel ? 'selected' : ''} onClick={toggleImagePanel}><SlidersHorizontal size={19}/><span>Imagen</span></button>
             <button className={fullscreen ? 'selected' : ''} onClick={toggleFullscreen} title="Pantalla completa"><Maximize size={19}/></button>
           </div>
         </div>
