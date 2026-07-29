@@ -28,6 +28,7 @@
 - Play actions now open an in-app CINE WANA player first, with external playback kept as an explicit option
 - Internal playback saves watch progress through the existing `watch_progress` database path for continue/resume behavior
 - Added playback-only controls: play/pause, seek, restart, volume, mute, fullscreen, and close
+- Added left/right double-click seeking in cumulative 10-second steps, press-and-hold 2× playback, and an explicit 100%-to-150% volume boost range with a safety detent at 100%
 - Added non-destructive image scanning and runtime adjustments for brightness, contrast, saturation, shadows, highlights, and temperature
 - Moved internal-player image scanning to Rust/FFmpeg so scene, light, and color analysis works with local Tauri media URLs without browser canvas security errors
 - Image scanning now pauses playback, reports live scan progress, and resumes from the original playback position when finished
@@ -102,6 +103,7 @@
 - Prepared version 0.3.1 as the signed pre-final updater release that makes `SERIES` and `PELÍCULAS` explicit, mandatory classification containers
 - Prepared version 0.3.2 as the signed pre-final updater release for cancellable next-episode and unwatched-movie handoff
 - Prepared version 0.3.3 as the signed updater release for automatic image analysis, immediate/cancellable 60-second next-content handoff on desktop and remote, and the joined two-color wordmark
+- Prepared version 0.3.4 as the signed updater release for cumulative 10-second double-click seeking, press-and-hold 2× playback, and the protected 100%-to-150% volume boost
 - Windows-hosted HTTP/WebSocket service for same-Wi-Fi control
 - QR and manual-URL pairing with approved, revocable device tokens
 - Mobile web remote for the internal player and existing library actions

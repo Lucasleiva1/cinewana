@@ -8,6 +8,12 @@ import {
 } from 'lucide-react';
 import type { ImageAnalysis, ImageAnalysisProgress, ImageSettings, MediaDetail, MediaSummary, RemoteCommand, RemotePlayerSnapshot } from './types';
 import { NEXT_UP_LEAD_SECONDS, nextUpSecondsRemaining, shouldAutoplayNextUp, shouldOfferNextUp } from './playerNextUp';
+import {
+  PLAYER_HOLD_DELAY_MS,
+  PLAYER_MAX_VOLUME,
+  resolveVolumeWithDetent,
+  seekSecondsForPoint,
+} from './playerControls';
 
 export interface InternalPlayerSource {
   detail: MediaDetail;
@@ -26,6 +32,14 @@ const defaultImage: ImageSettings = {
 };
 
 const CONTROLS_HIDE_DELAY_MS = 2600;
+const SINGLE_CLICK_DELAY_MS = 240;
+
+interface PlayerAudioGraph {
+  context: AudioContext;
+  gain: GainNode;
+  limiter: DynamicsCompressorNode;
+  source: MediaElementAudioSourceNode;
+}
 
 export function InternalPlayer({
   source,
@@ -44,8 +58,18 @@ export function InternalPlayer({
   const shellRef = useRef<HTMLDivElement>(null);
   const saveTimerRef = useRef<number | null>(null);
   const controlsTimerRef = useRef<number | null>(null);
+  const singleClickTimerRef = useRef<number | null>(null);
+  const holdTimerRef = useRef<number | null>(null);
+  const seekFeedbackTimerRef = useRef<number | null>(null);
   const lastSavedAtRef = useRef(0);
   const lastPointerRef = useRef({ x: 0, y: 0, ready: false });
+  const pressStartRef = useRef({ x: 0, y: 0 });
+  const holdActiveRef = useRef(false);
+  const suppressSurfaceClickRef = useRef(false);
+  const playbackRateBeforeHoldRef = useRef(1);
+  const audioGraphRef = useRef<PlayerAudioGraph | null>(null);
+  const desiredVolumeRef = useRef(0.82);
+  const volumeDetentReachedAtRef = useRef<number | null>(null);
   const initialWindowFullscreenRef = useRef<boolean | null>(null);
   const restoredRef = useRef(false);
   const nextStartingRef = useRef(false);
@@ -55,6 +79,9 @@ export function InternalPlayer({
   const [duration, setDuration] = useState(() => msToSeconds(source.detail.runtimeMs ?? source.detail.technical.durationMs ?? 0));
   const [volume, setVolume] = useState(0.82);
   const [muted, setMuted] = useState(false);
+  const [audioBoostReady, setAudioBoostReady] = useState(false);
+  const [fastForward, setFastForward] = useState(false);
+  const [seekFeedback, setSeekFeedback] = useState<{ seconds: number; key: number } | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [showImagePanel, setShowImagePanel] = useState(false);
@@ -157,6 +184,130 @@ export function InternalPlayer({
     setCurrent(video.currentTime);
   }, [duration]);
 
+  const ensureAudioBoost = useCallback(async () => {
+    const existing = audioGraphRef.current;
+    if (existing) {
+      if (existing.context.state === 'suspended') await existing.context.resume();
+      return existing;
+    }
+    const video = videoRef.current;
+    if (!video) throw new Error('El reproductor todavía no está disponible.');
+    const context = new AudioContext();
+    const sourceNode = context.createMediaElementSource(video);
+    const gain = context.createGain();
+    const limiter = context.createDynamicsCompressor();
+    limiter.threshold.value = -3;
+    limiter.knee.value = 8;
+    limiter.ratio.value = 4;
+    limiter.attack.value = 0.003;
+    limiter.release.value = 0.2;
+    sourceNode.connect(gain);
+    gain.connect(limiter);
+    limiter.connect(context.destination);
+    const graph = { context, gain, limiter, source: sourceNode };
+    audioGraphRef.current = graph;
+    video.volume = 1;
+    video.muted = false;
+    gain.gain.value = muted ? 0 : desiredVolumeRef.current;
+    setAudioBoostReady(true);
+    if (context.state === 'suspended') await context.resume();
+    return graph;
+  }, [muted]);
+
+  const applyVolume = useCallback((nextVolume: number, nextMuted = nextVolume === 0) => {
+    const next = clamp(nextVolume, 0, PLAYER_MAX_VOLUME);
+    desiredVolumeRef.current = next;
+    setVolume(next);
+    setMuted(nextMuted);
+    if (next > 1) {
+      void ensureAudioBoost().catch(() => {
+        desiredVolumeRef.current = 1;
+        setVolume(1);
+        setMuted(false);
+        setError('No se pudo activar el refuerzo de volumen en este equipo.');
+      });
+    }
+  }, [ensureAudioBoost]);
+
+  const stopFastForward = useCallback(() => {
+    if (holdTimerRef.current) {
+      window.clearTimeout(holdTimerRef.current);
+      holdTimerRef.current = null;
+    }
+    if (!holdActiveRef.current) return;
+    const video = videoRef.current;
+    if (video) video.playbackRate = playbackRateBeforeHoldRef.current;
+    holdActiveRef.current = false;
+    suppressSurfaceClickRef.current = true;
+    setFastForward(false);
+  }, []);
+
+  const showSeekFeedback = useCallback((seconds: number) => {
+    if (seekFeedbackTimerRef.current) window.clearTimeout(seekFeedbackTimerRef.current);
+    setSeekFeedback({ seconds, key: Date.now() });
+    seekFeedbackTimerRef.current = window.setTimeout(() => {
+      setSeekFeedback(null);
+      seekFeedbackTimerRef.current = null;
+    }, 650);
+  }, []);
+
+  const handleSurfacePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || !event.isPrimary) return;
+    pressStartRef.current = { x: event.clientX, y: event.clientY };
+    suppressSurfaceClickRef.current = false;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    if (holdTimerRef.current) window.clearTimeout(holdTimerRef.current);
+    holdTimerRef.current = window.setTimeout(() => {
+      const video = videoRef.current;
+      if (!video || video.paused) return;
+      playbackRateBeforeHoldRef.current = video.playbackRate;
+      video.playbackRate = 2;
+      holdActiveRef.current = true;
+      setFastForward(true);
+      setControlsVisible(true);
+    }, PLAYER_HOLD_DELAY_MS);
+  }, []);
+
+  const handleSurfacePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (Math.hypot(event.clientX - pressStartRef.current.x, event.clientY - pressStartRef.current.y) < 12) return;
+    if (holdTimerRef.current && !holdActiveRef.current) {
+      window.clearTimeout(holdTimerRef.current);
+      holdTimerRef.current = null;
+    }
+  }, []);
+
+  const handleSurfacePointerEnd = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    stopFastForward();
+  }, [stopFastForward]);
+
+  const handleSurfaceClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (suppressSurfaceClickRef.current) {
+      suppressSurfaceClickRef.current = false;
+      return;
+    }
+    if (event.detail > 1) return;
+    if (singleClickTimerRef.current) window.clearTimeout(singleClickTimerRef.current);
+    singleClickTimerRef.current = window.setTimeout(() => {
+      togglePlay();
+      singleClickTimerRef.current = null;
+    }, SINGLE_CLICK_DELAY_MS);
+  }, [togglePlay]);
+
+  const handleSurfaceDoubleClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    if (singleClickTimerRef.current) {
+      window.clearTimeout(singleClickTimerRef.current);
+      singleClickTimerRef.current = null;
+    }
+    const rect = event.currentTarget.getBoundingClientRect();
+    const seconds = seekSecondsForPoint(event.clientX, rect.left, rect.width);
+    seekBy(seconds);
+    showSeekFeedback(seconds);
+  }, [seekBy, showSeekFeedback]);
+
   const seekToPercent = useCallback((clientX: number, element: HTMLElement) => {
     const video = videoRef.current;
     if (!video) return;
@@ -214,7 +365,7 @@ export function InternalPlayer({
       positionSeconds: current,
       durationSeconds: duration,
       playing,
-      volume,
+      volume: Math.min(volume, 1),
       muted,
       fullscreen,
       imageAnalyzing: analyzing,
@@ -344,14 +495,10 @@ export function InternalPlayer({
         setCurrent(video.currentTime);
       }
       if (command.type === 'player_set_volume') {
-        video.volume = clamp(command.volume, 0, 1);
-        video.muted = video.volume === 0;
-        setVolume(video.volume);
-        setMuted(video.muted);
+        applyVolume(clamp(command.volume, 0, 1));
       }
       if (command.type === 'player_toggle_mute') {
-        video.muted = !video.muted;
-        setMuted(video.muted);
+        setMuted(value => !value);
       }
       if (command.type === 'player_toggle_fullscreen') toggleFullscreen();
       if (command.type === 'player_start_next_up') void startNextUp();
@@ -365,7 +512,21 @@ export function InternalPlayer({
       if (disposed) unlisten(); else cleanup = unlisten;
     });
     return () => { disposed = true; cleanup?.(); };
-  }, [analyzeImage, cancelNextPrompt, duration, seekBy, startNextUp, toggleFullscreen, togglePlay]);
+  }, [analyzeImage, applyVolume, cancelNextPrompt, duration, seekBy, startNextUp, toggleFullscreen, togglePlay]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const graph = audioGraphRef.current;
+    if (graph) {
+      video.volume = 1;
+      video.muted = false;
+      graph.gain.gain.setTargetAtTime(muted ? 0 : volume, graph.context.currentTime, 0.018);
+      return;
+    }
+    video.volume = Math.min(volume, 1);
+    video.muted = muted || volume === 0;
+  }, [audioBoostReady, muted, volume]);
 
   useEffect(() => {
     let cancelled = false;
@@ -467,6 +628,11 @@ export function InternalPlayer({
   useEffect(() => {
     return () => {
       if (saveTimerRef.current) window.clearInterval(saveTimerRef.current);
+      if (singleClickTimerRef.current) window.clearTimeout(singleClickTimerRef.current);
+      if (holdTimerRef.current) window.clearTimeout(holdTimerRef.current);
+      if (seekFeedbackTimerRef.current) window.clearTimeout(seekFeedbackTimerRef.current);
+      const graph = audioGraphRef.current;
+      if (graph) void graph.context.close();
     };
   }, []);
 
@@ -484,7 +650,9 @@ export function InternalPlayer({
     setAnalysis(null);
     setAnalysisProgress(null);
     setImage(defaultImage);
-  }, [source.detail.id, source.detail.runtimeMs, source.detail.technical.durationMs]);
+    stopFastForward();
+    setSeekFeedback(null);
+  }, [source.detail.id, source.detail.runtimeMs, source.detail.technical.durationMs, stopFastForward]);
 
   useEffect(() => {
     let cancelled = false;
@@ -526,10 +694,8 @@ export function InternalPlayer({
         autoPlay
         playsInline
         controls={false}
-        muted={muted}
+        muted={audioBoostReady ? false : muted}
         style={{ filter: imageFilter }}
-        onClick={togglePlay}
-        onDoubleClick={toggleFullscreen}
         onLoadedMetadata={(event) => {
           const video = event.currentTarget;
           const nextDuration = Number.isFinite(video.duration) ? video.duration : duration;
@@ -553,10 +719,6 @@ export function InternalPlayer({
           setCurrent(event.currentTarget.currentTime);
           setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : duration);
         }}
-        onVolumeChange={(event) => {
-          setVolume(event.currentTarget.volume);
-          setMuted(event.currentTarget.muted);
-        }}
         onEnded={() => {
           setPlaying(false);
           if (shouldAutoplayNextUp(Boolean(nextUp), nextDismissed)) {
@@ -570,6 +732,14 @@ export function InternalPlayer({
       <div className="cw-player-layer" style={imageOverlay}>
         <span className="temperature" />
       </div>
+
+      {seekFeedback && (
+        <div key={seekFeedback.key} className={`cw-seek-feedback ${seekFeedback.seconds > 0 ? 'forward' : 'backward'}`}>
+          {seekFeedback.seconds > 0 ? <SkipForward size={28}/> : <SkipBack size={28}/>}
+          <b>{seekFeedback.seconds > 0 ? '+' : '−'}10 s</b>
+        </div>
+      )}
+      {fastForward && <div className="cw-speed-feedback"><b>2×</b><span>Reproducción rápida</span></div>}
 
       {error && <div className="cw-player-error"><span>{error}</span><button onClick={() => setError(null)}><X size={16}/></button></div>}
 
@@ -603,7 +773,16 @@ export function InternalPlayer({
         </div>
       </div>
 
-      <div className="cw-player-center" onClick={togglePlay}>
+      <div
+        className="cw-player-center"
+        onClick={handleSurfaceClick}
+        onDoubleClick={handleSurfaceDoubleClick}
+        onPointerDown={handleSurfacePointerDown}
+        onPointerMove={handleSurfacePointerMove}
+        onPointerUp={handleSurfacePointerEnd}
+        onPointerCancel={handleSurfacePointerEnd}
+        onContextMenu={event => event.preventDefault()}
+      >
         {!playing && <button className="cw-big-play"><Play fill="currentColor" size={34}/></button>}
       </div>
 
@@ -678,16 +857,37 @@ export function InternalPlayer({
           </div>
           <div className="cw-controls-right">
             <button onClick={() => setMuted(value => !value)}>{muted || volume === 0 ? <VolumeX size={19}/> : <Volume2 size={19}/>}</button>
-            <input className="cw-volume" min={0} max={1} step={0.01} type="range" value={muted ? 0 : volume} onChange={event => {
-              const next = Number(event.target.value);
-              const video = videoRef.current;
-              if (video) {
-                video.volume = next;
-                video.muted = next === 0;
-              }
-              setVolume(next);
-              setMuted(next === 0);
-            }}/>
+            <div
+              className={`cw-volume-slider ${volume > 1 ? 'boosted' : ''}`}
+              style={{
+                '--normal-fill': `${Math.min(volume, 1) / PLAYER_MAX_VOLUME * 100}%`,
+                '--boost-fill': `${Math.max(0, volume - 1) / PLAYER_MAX_VOLUME * 100}%`,
+              } as React.CSSProperties}
+            >
+              <span className="cw-volume-track" />
+              <span className="cw-volume-normal-fill" />
+              <span className="cw-volume-boost-fill" />
+              <span className="cw-volume-detent" />
+              <input
+                aria-label="Volumen"
+                min={0}
+                max={PLAYER_MAX_VOLUME}
+                step={0.01}
+                type="range"
+                value={muted ? 0 : volume}
+                title={`${Math.round((muted ? 0 : volume) * 100)}%${volume > 1 ? ' · volumen reforzado' : ''}`}
+                onChange={event => {
+                  const resolved = resolveVolumeWithDetent(
+                    Number(event.target.value),
+                    volumeDetentReachedAtRef.current,
+                    performance.now(),
+                  );
+                  volumeDetentReachedAtRef.current = resolved.detentReachedAt;
+                  applyVolume(resolved.volume);
+                }}
+              />
+            </div>
+            <span className={`cw-volume-value ${volume > 1 ? 'boosted' : ''}`}>{Math.round((muted ? 0 : volume) * 100)}%</span>
             <button className={showImagePanel ? 'selected' : ''} onClick={toggleImagePanel}><SlidersHorizontal size={19}/><span>Imagen</span></button>
             <button className={fullscreen ? 'selected' : ''} onClick={toggleFullscreen} title="Pantalla completa"><Maximize size={19}/></button>
           </div>
