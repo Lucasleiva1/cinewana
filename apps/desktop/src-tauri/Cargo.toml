@@ -32,4 +32,5 @@ tauri = { version = "2", features = ["protocol-asset", "unstable"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 tokio.workspace = true
+tokio-util = { version = "0.7.16", features = ["io"] }
 uuid.workspace = true

@@ -11,13 +11,13 @@ import { NEXT_UP_LEAD_SECONDS, nextUpSecondsRemaining, shouldAutoplayNextUp, sho
 import {
   PLAYER_HOLD_DELAY_MS,
   PLAYER_MAX_VOLUME,
+  playerVolumeRouting,
   resolveVolumeWithDetent,
   seekSecondsForPoint,
 } from './playerControls';
 
 export interface InternalPlayerSource {
   detail: MediaDetail;
-  path: string;
   url: string;
   resumeMs: number;
 }
@@ -68,7 +68,7 @@ export function InternalPlayer({
   const suppressSurfaceClickRef = useRef(false);
   const playbackRateBeforeHoldRef = useRef(1);
   const audioGraphRef = useRef<PlayerAudioGraph | null>(null);
-  const desiredVolumeRef = useRef(0.82);
+  const desiredVolumeRef = useRef(0.5);
   const volumeDetentReachedAtRef = useRef<number | null>(null);
   const initialWindowFullscreenRef = useRef<boolean | null>(null);
   const restoredRef = useRef(false);
@@ -77,7 +77,7 @@ export function InternalPlayer({
   const [playing, setPlaying] = useState(true);
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(() => msToSeconds(source.detail.runtimeMs ?? source.detail.technical.durationMs ?? 0));
-  const [volume, setVolume] = useState(0.82);
+  const [volume, setVolume] = useState(0.5);
   const [muted, setMuted] = useState(false);
   const [audioBoostReady, setAudioBoostReady] = useState(false);
   const [fastForward, setFastForward] = useState(false);
@@ -208,7 +208,7 @@ export function InternalPlayer({
     audioGraphRef.current = graph;
     video.volume = 1;
     video.muted = false;
-    gain.gain.value = muted ? 0 : desiredVolumeRef.current;
+    gain.gain.value = playerVolumeRouting(desiredVolumeRef.current, muted, true).amplifiedGain;
     setAudioBoostReady(true);
     if (context.state === 'suspended') await context.resume();
     return graph;
@@ -219,10 +219,10 @@ export function InternalPlayer({
     desiredVolumeRef.current = next;
     setVolume(next);
     setMuted(nextMuted);
-    if (next > 1) {
+    if (next > 0.5) {
       void ensureAudioBoost().catch(() => {
-        desiredVolumeRef.current = 1;
-        setVolume(1);
+        desiredVolumeRef.current = 0.5;
+        setVolume(0.5);
         setMuted(false);
         setError('No se pudo activar el refuerzo de volumen en este equipo.');
       });
@@ -518,14 +518,15 @@ export function InternalPlayer({
     const video = videoRef.current;
     if (!video) return;
     const graph = audioGraphRef.current;
+    const routing = playerVolumeRouting(volume, muted, Boolean(graph));
     if (graph) {
       video.volume = 1;
       video.muted = false;
-      graph.gain.gain.setTargetAtTime(muted ? 0 : volume, graph.context.currentTime, 0.018);
-      return;
+      graph.gain.gain.setTargetAtTime(routing.amplifiedGain, graph.context.currentTime, 0.018);
+    } else {
+      video.volume = routing.nativeVolume;
+      video.muted = routing.nativeMuted;
     }
-    video.volume = Math.min(volume, 1);
-    video.muted = muted || volume === 0;
   }, [audioBoostReady, muted, volume]);
 
   useEffect(() => {
@@ -632,7 +633,10 @@ export function InternalPlayer({
       if (holdTimerRef.current) window.clearTimeout(holdTimerRef.current);
       if (seekFeedbackTimerRef.current) window.clearTimeout(seekFeedbackTimerRef.current);
       const graph = audioGraphRef.current;
-      if (graph) void graph.context.close();
+      if (graph) {
+        graph.source.disconnect();
+        void graph.context.close();
+      }
     };
   }, []);
 
@@ -689,12 +693,12 @@ export function InternalPlayer({
       </svg>
       <video
         ref={videoRef}
+        crossOrigin="anonymous"
         className="cw-player-video"
         src={source.url}
         autoPlay
         playsInline
         controls={false}
-        muted={audioBoostReady ? false : muted}
         style={{ filter: imageFilter }}
         onLoadedMetadata={(event) => {
           const video = event.currentTarget;
@@ -858,16 +862,15 @@ export function InternalPlayer({
           <div className="cw-controls-right">
             <button onClick={() => setMuted(value => !value)}>{muted || volume === 0 ? <VolumeX size={19}/> : <Volume2 size={19}/>}</button>
             <div
-              className={`cw-volume-slider ${volume > 1 ? 'boosted' : ''}`}
+              className={`cw-volume-slider ${volume > 0.5 ? 'boosted' : ''}`}
               style={{
-                '--normal-fill': `${Math.min(volume, 1) / PLAYER_MAX_VOLUME * 100}%`,
-                '--boost-fill': `${Math.max(0, volume - 1) / PLAYER_MAX_VOLUME * 100}%`,
+                '--normal-fill': `${Math.min(volume, 0.5) / PLAYER_MAX_VOLUME * 100}%`,
+                '--boost-fill': `${Math.max(0, volume - 0.5) / PLAYER_MAX_VOLUME * 100}%`,
               } as React.CSSProperties}
             >
               <span className="cw-volume-track" />
               <span className="cw-volume-normal-fill" />
               <span className="cw-volume-boost-fill" />
-              <span className="cw-volume-detent" />
               <input
                 aria-label="Volumen"
                 min={0}
@@ -875,7 +878,7 @@ export function InternalPlayer({
                 step={0.01}
                 type="range"
                 value={muted ? 0 : volume}
-                title={`${Math.round((muted ? 0 : volume) * 100)}%${volume > 1 ? ' · volumen reforzado' : ''}`}
+                title={`${Math.round((muted ? 0 : volume) * 100)}%${volume > 0.5 ? ' · volumen reforzado' : ''}`}
                 onChange={event => {
                   const resolved = resolveVolumeWithDetent(
                     Number(event.target.value),
@@ -887,7 +890,7 @@ export function InternalPlayer({
                 }}
               />
             </div>
-            <span className={`cw-volume-value ${volume > 1 ? 'boosted' : ''}`}>{Math.round((muted ? 0 : volume) * 100)}%</span>
+            <span className={`cw-volume-value ${volume > 0.5 ? 'boosted' : ''}`}>{Math.round((muted ? 0 : volume) * 100)}%</span>
             <button className={showImagePanel ? 'selected' : ''} onClick={toggleImagePanel}><SlidersHorizontal size={19}/><span>Imagen</span></button>
             <button className={fullscreen ? 'selected' : ''} onClick={toggleFullscreen} title="Pantalla completa"><Maximize size={19}/></button>
           </div>

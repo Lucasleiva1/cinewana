@@ -1,7 +1,7 @@
 export const PLAYER_SEEK_SECONDS = 10;
 export const PLAYER_HOLD_DELAY_MS = 450;
-export const PLAYER_MAX_VOLUME = 1.5;
-export const PLAYER_VOLUME_DETENT = 1;
+export const PLAYER_MAX_VOLUME = 1;
+export const PLAYER_VOLUME_DETENT = 0.5;
 export const PLAYER_VOLUME_DETENT_MS = 420;
 
 export function seekSecondsForPoint(clientX: number, left: number, width: number) {
@@ -26,6 +26,17 @@ export function resolveVolumeWithDetent(
     return { volume: PLAYER_VOLUME_DETENT, detentReachedAt: reachedAt };
   }
   return { volume, detentReachedAt: reachedAt };
+}
+
+export function playerVolumeRouting(volume: number, muted: boolean, boostReady: boolean) {
+  const normalized = clamp(volume, 0, PLAYER_MAX_VOLUME);
+  return {
+    nativeVolume: Math.min(normalized / PLAYER_VOLUME_DETENT, 1),
+    nativeMuted: muted || normalized === 0,
+    amplifiedGain: boostReady && !muted
+      ? normalized / PLAYER_VOLUME_DETENT
+      : 0,
+  };
 }
 
 function clamp(value: number, min: number, max: number) {

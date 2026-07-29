@@ -1,3 +1,4 @@
+mod media_stream;
 mod remote;
 
 use cinewana_core::{
@@ -8,6 +9,7 @@ use cinewana_core::{
 use cinewana_database::{Database, MetadataImportTarget};
 use cinewana_metadata::{MetadataSearchOutcome, WikipediaMetadataClient};
 use cinewana_player::PlayerService;
+use media_stream::MediaStreamService;
 use parking_lot::Mutex;
 use std::{
     path::PathBuf,
@@ -32,6 +34,7 @@ struct AppServices {
     cache_dir: PathBuf,
     metadata: Arc<WikipediaMetadataClient>,
     player: Arc<PlayerService>,
+    media_stream: Arc<MediaStreamService>,
     remote: Arc<RemoteService>,
 }
 
@@ -281,6 +284,17 @@ fn technical_path(
     state: State<'_, AppServices>,
 ) -> Result<Option<String>, String> {
     state.db.media_path(&media_id).map_err(error_string)
+}
+
+#[tauri::command]
+fn player_media_url(media_id: String, state: State<'_, AppServices>) -> Result<String, String> {
+    let path = state
+        .db
+        .media_path(&media_id)
+        .map_err(error_string)?
+        .map(PathBuf::from)
+        .ok_or_else(|| "El archivo ya no está disponible".to_string())?;
+    state.media_stream.register(path)
 }
 
 #[tauri::command]
@@ -906,6 +920,7 @@ pub fn run() {
             db.seed_root(DEFAULT_LIBRARY_ROOT)?;
             let ffmpeg = find_command("ffmpeg");
             let remote = RemoteService::new(db.clone(), app.handle().clone(), &app_data, &resource_dir);
+            let media_stream = Arc::new(MediaStreamService::new()?);
             let services = AppServices {
                 db,
                 progress: Arc::new(Mutex::new(ScanProgress::default())),
@@ -916,6 +931,7 @@ pub fn run() {
                 cache_dir: app_data.join("cache"),
                 metadata: Arc::new(WikipediaMetadataClient::new()?),
                 player: Arc::new(PlayerService::discover()),
+                media_stream,
                 remote,
             };
             app.manage(services.clone());
@@ -946,6 +962,7 @@ pub fn run() {
             cancel_scan,
             replace_library_root,
             technical_path,
+            player_media_url,
             reveal_media_file,
             rescan_media_item,
             analyze_media_image,

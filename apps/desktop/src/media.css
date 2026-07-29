@@ -117,12 +117,11 @@
 .cw-controls-row button.selected { border-color:#c8a46a80; color:#ffe0ad; background:#c8a46a22; }
 .cw-controls-row .cw-play { width:54px; height:54px; border-radius:50%; background:#b11226; border-color:#b11226; color:#fff; }
 .cw-time { color:#ddd; font-size:12px; font-variant-numeric:tabular-nums; margin-left:6px; text-shadow:0 1px 6px #000; }
-.cw-volume-slider { --normal-end:66.6667%; position:relative; width:128px; height:22px; flex:0 0 128px; }
+.cw-volume-slider { --normal-end:50%; position:relative; width:128px; height:22px; flex:0 0 128px; }
 .cw-volume-slider>span { position:absolute; top:50%; height:5px; transform:translateY(-50%); pointer-events:none; }
-.cw-volume-track { left:0; right:0; border-radius:999px; background:linear-gradient(90deg,#ffffff28 0 var(--normal-end),#8a8a8a42 var(--normal-end) 100%); }
-.cw-volume-normal-fill { left:0; width:var(--normal-fill); border-radius:999px 0 0 999px; background:#b11226; box-shadow:0 0 13px #b1122675; }
+.cw-volume-track { left:0; right:0; border-radius:999px; background:linear-gradient(90deg,#ffffff28 0 43%,#6f30386b var(--normal-end),#8a8a8a42 64% 100%); }
+.cw-volume-normal-fill { left:0; width:var(--normal-fill); border-radius:999px 0 0 999px; background:linear-gradient(90deg,#b11226 0%,#b11226 80%,#a72a3a 91%,#777 100%); box-shadow:0 0 13px #b1122675; }
 .cw-volume-boost-fill { left:var(--normal-end); width:var(--boost-fill); border-radius:0 999px 999px 0; background:#a8a8a8; box-shadow:0 0 11px #bdbdbd4d; }
-.cw-volume-detent { left:var(--normal-end); width:2px; height:11px!important; border-radius:2px; background:#ececec; box-shadow:0 0 0 2px #0008; }
 .cw-volume-slider input { position:absolute; inset:0; width:100%; height:22px; margin:0; appearance:none; -webkit-appearance:none; background:transparent; cursor:pointer; }
 .cw-volume-slider input::-webkit-slider-runnable-track { height:5px; background:transparent; }
 .cw-volume-slider input::-webkit-slider-thumb { width:15px; height:15px; margin-top:-5px; border:2px solid #fff; border-radius:50%; background:#f5f5f5; box-shadow:0 2px 9px #000; appearance:none; -webkit-appearance:none; }

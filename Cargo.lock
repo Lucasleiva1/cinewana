@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "cine-wana-desktop"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -437,12 +437,13 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-updater",
  "tokio",
+ "tokio-util",
  "uuid",
 ]
 
 [[package]]
 name = "cinewana-core"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "chrono",
  "regex",
@@ -452,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "cinewana-database"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -466,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "cinewana-metadata"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -479,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "cinewana-player"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "cinewana-core",
@@ -490,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "cinewana-scanner"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "blake3",
