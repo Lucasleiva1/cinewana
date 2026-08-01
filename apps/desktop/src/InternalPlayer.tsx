@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   ExternalLink, Maximize, Pause, Play, RotateCcw, SkipBack, SkipForward,
-  SlidersHorizontal, Sparkles, Volume2, VolumeX, X
+  Settings, SlidersHorizontal, Sparkles, Volume2, VolumeX, X
 } from 'lucide-react';
 import type { ImageAnalysis, ImageAnalysisProgress, ImageSettings, MediaDetail, MediaSummary, RemoteCommand, RemotePlayerSnapshot } from './types';
 import { NEXT_UP_LEAD_SECONDS, nextUpSecondsRemaining, shouldAutoplayNextUp, shouldOfferNextUp } from './playerNextUp';
@@ -47,12 +47,14 @@ export function InternalPlayer({
   onOpenExternal,
   onPlayNext,
   onProgressSaved,
+  settingsPanel,
 }: {
   source: InternalPlayerSource;
   onClose: () => void;
   onOpenExternal: (id: string) => Promise<void>;
   onPlayNext: (id: string) => Promise<void>;
   onProgressSaved: () => void;
+  settingsPanel: ReactNode;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const shellRef = useRef<HTMLDivElement>(null);
@@ -85,6 +87,7 @@ export function InternalPlayer({
   const [fullscreen, setFullscreen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [showImagePanel, setShowImagePanel] = useState(false);
+  const [showSettingsPanel, setShowSettingsPanel] = useState(false);
   const [image, setImage] = useState<ImageSettings>(defaultImage);
   const [analysis, setAnalysis] = useState<ImageAnalysis | null>(null);
   const [analysisProgress, setAnalysisProgress] = useState<ImageAnalysisProgress | null>(null);
@@ -477,9 +480,16 @@ export function InternalPlayer({
       setShowImagePanel(false);
       return;
     }
+    setShowSettingsPanel(false);
     setShowImagePanel(true);
     void analyzeImage();
   }, [analyzeImage, showImagePanel]);
+
+  const toggleSettingsPanel = useCallback(() => {
+    setShowImagePanel(false);
+    setShowSettingsPanel(value => !value);
+    setControlsVisible(true);
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -551,7 +561,7 @@ export function InternalPlayer({
 
   useEffect(() => {
     clearControlsTimer();
-    if (!playing || showImagePanel || nextPromptVisible || error) {
+    if (!playing || showImagePanel || showSettingsPanel || nextPromptVisible || error) {
       setControlsVisible(true);
       return;
     }
@@ -562,7 +572,7 @@ export function InternalPlayer({
       }, CONTROLS_HIDE_DELAY_MS);
     }
     return clearControlsTimer;
-  }, [clearControlsTimer, controlsVisible, error, nextPromptVisible, playing, showImagePanel]);
+  }, [clearControlsTimer, controlsVisible, error, nextPromptVisible, playing, showImagePanel, showSettingsPanel]);
 
   useEffect(() => {
     const revealControls = () => {
@@ -615,7 +625,11 @@ export function InternalPlayer({
       if (event.key.toLowerCase() === 'f') { event.preventDefault(); toggleFullscreen(); }
       if (event.key === 'Escape') {
         event.preventDefault();
-        if (fullscreen || document.fullscreenElement) {
+        if (showSettingsPanel) {
+          setShowSettingsPanel(false);
+        } else if (showImagePanel) {
+          setShowImagePanel(false);
+        } else if (fullscreen || document.fullscreenElement) {
           toggleFullscreen();
         } else {
           closePlayer();
@@ -624,7 +638,7 @@ export function InternalPlayer({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [closePlayer, fullscreen, seekBy, toggleFullscreen, togglePlay]);
+  }, [closePlayer, fullscreen, seekBy, showImagePanel, showSettingsPanel, toggleFullscreen, togglePlay]);
 
   useEffect(() => {
     return () => {
@@ -681,7 +695,7 @@ export function InternalPlayer({
   const progress = duration > 0 ? clamp(current / duration, 0, 1) : 0;
 
   return (
-    <div ref={shellRef} className={`cw-player-shell ${controlsVisible ? '' : 'idle'} ${showImagePanel ? 'image-open' : ''}`}>
+    <div ref={shellRef} className={`cw-player-shell ${controlsVisible ? '' : 'idle'} ${showImagePanel ? 'image-open' : ''} ${showSettingsPanel ? 'settings-open' : ''}`}>
       <svg className="cw-filter-defs" aria-hidden="true" focusable="false">
         <filter id="cw-tonal-curve" colorInterpolationFilters="sRGB">
           <feComponentTransfer>
@@ -773,6 +787,7 @@ export function InternalPlayer({
         </div>
         <div className="cw-player-top-actions">
           <button onClick={openExternal} title="Abrir con reproductor externo"><ExternalLink size={17}/>Externo</button>
+          <button className={showSettingsPanel ? 'selected' : ''} onClick={toggleSettingsPanel} title="Abrir configuración"><Settings size={18}/></button>
           <button onClick={closePlayer} title="Cerrar reproductor"><X size={20}/></button>
         </div>
       </div>
@@ -831,6 +846,16 @@ export function InternalPlayer({
             </label>
           ))}
           <button className="cw-reset-image" onClick={() => { setImage(defaultImage); setAnalysis(null); }}>Reset imagen</button>
+        </aside>
+      )}
+
+      {showSettingsPanel && (
+        <aside className="cw-settings-panel" onClick={event => event.stopPropagation()}>
+          <div className="cw-panel-head cw-settings-panel-head">
+            <div><b>Configuración</b><small>Los mismos ajustes de CINE WANA, sin salir del reproductor.</small></div>
+            <button onClick={() => setShowSettingsPanel(false)} title="Cerrar configuración"><X size={16}/></button>
+          </div>
+          <div className="cw-settings-panel-content">{settingsPanel}</div>
         </aside>
       )}
 

@@ -168,6 +168,7 @@ pub struct PairingDto {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteStatusDto {
     pub enabled: bool,
+    pub auto_start: bool,
     pub computer_name: String,
     pub address: String,
     pub port: u16,
@@ -294,6 +295,7 @@ impl RemoteService {
         let base_url = format!("http://{}:{}", state.address, state.port);
         RemoteStatusDto {
             enabled: state.enabled,
+            auto_start: self.db.remote_auto_start().unwrap_or(false),
             computer_name: computer_name(),
             address: state.address.clone(),
             port: state.port,
@@ -384,6 +386,14 @@ impl RemoteService {
         drop(state);
         self.emit_status();
         self.status()
+    }
+
+    pub fn set_auto_start(&self, enabled: bool) -> Result<(), String> {
+        self.db
+            .set_remote_auto_start(enabled)
+            .map_err(|error| error.to_string())?;
+        self.emit_status();
+        Ok(())
     }
 
     pub fn create_pairing(&self) -> Result<RemoteStatusDto, String> {

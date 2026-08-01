@@ -100,6 +100,10 @@
 
 ## In progress: local remote control PWA
 
+- The internal player now opens the same complete Settings view in a side panel matching the Image panel width, so playback can continue while remote control and other options are managed
+- Remote-control Settings now includes a persistent **Siempre activo** switch that starts the authenticated local service automatically when CINE WANA opens while preserving the manual activate/deactivate button
+- Prepared version 0.3.6 as the signed updater release for in-player access to the shared Settings view and persistent automatic remote-control startup
+
 - Prepared version 0.2.1 as the installable Windows x64 test update that exposes **Configuración → Control remoto** in the desktop application
 - Prepared version 0.3.0-rc.1 as the important pre-final updater release for resilient series identification, targeted rescans, daily discovery rotation, and the local remote-control PWA
 - Prepared version 0.3.1 as the signed pre-final updater release that makes `SERIES` and `PELÍCULAS` explicit, mandatory classification containers

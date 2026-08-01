@@ -1389,6 +1389,32 @@ impl Database {
             != 0)
     }
 
+    pub fn remote_auto_start(&self) -> Result<bool> {
+        let stored = self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT value_json FROM settings WHERE key='remote_auto_start'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(stored
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<bool>(value).ok())
+            .unwrap_or(false))
+    }
+
+    pub fn set_remote_auto_start(&self, enabled: bool) -> Result<()> {
+        let value = serde_json::to_string(&enabled)?;
+        let now = Utc::now().to_rfc3339();
+        self.connection.lock().execute(
+            "INSERT INTO settings(key,value_json,updated_at) VALUES('remote_auto_start',?1,?2) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
+            params![value, now],
+        )?;
+        Ok(())
+    }
+
     pub fn backup_to(&self, target: &Path) -> Result<()> {
         let escaped = target.to_string_lossy().replace('\'', "''");
         self.connection
@@ -1882,6 +1908,16 @@ mod tests {
             technical: MediaTechnical::default(),
             external_subtitles: vec![],
         }
+    }
+
+    #[test]
+    fn persists_remote_auto_start_preference() {
+        let db = Database::open(":memory:").unwrap();
+        assert!(!db.remote_auto_start().unwrap());
+        db.set_remote_auto_start(true).unwrap();
+        assert!(db.remote_auto_start().unwrap());
+        db.set_remote_auto_start(false).unwrap();
+        assert!(!db.remote_auto_start().unwrap());
     }
 
     #[test]

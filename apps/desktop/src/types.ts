@@ -42,7 +42,7 @@ export interface RemoteDevice { id:string; name:string; createdAt:string; lastSe
 export interface PendingRemotePairing { id:string; deviceName:string; requestedAt:string }
 export interface RemotePairing { url:string; code:string; expiresAt:string; qrDataUrl:string }
 export interface RemoteStatus {
-  enabled:boolean; computerName:string; address:string; port:number; url?:string|null; secureContext:boolean;
+  enabled:boolean; autoStart:boolean; computerName:string; address:string; port:number; url?:string|null; secureContext:boolean;
   pairing?:RemotePairing|null; devices:RemoteDevice[]; pending:PendingRemotePairing[]; lastConnectedAt?:string|null;
   assetRootReady:boolean; error?:string|null;
 }

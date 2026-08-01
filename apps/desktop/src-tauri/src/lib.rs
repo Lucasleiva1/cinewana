@@ -557,6 +557,19 @@ fn remote_stop(state: State<'_, AppServices>) -> RemoteStatusDto {
 }
 
 #[tauri::command]
+async fn remote_set_auto_start(
+    enabled: bool,
+    state: State<'_, AppServices>,
+) -> Result<RemoteStatusDto, String> {
+    state.remote.set_auto_start(enabled)?;
+    if enabled && !state.remote.status().enabled {
+        state.remote.start().await
+    } else {
+        Ok(state.remote.status())
+    }
+}
+
+#[tauri::command]
 fn remote_create_pairing(state: State<'_, AppServices>) -> Result<RemoteStatusDto, String> {
     state.remote.create_pairing()
 }
@@ -920,6 +933,8 @@ pub fn run() {
             db.seed_root(DEFAULT_LIBRARY_ROOT)?;
             let ffmpeg = find_command("ffmpeg");
             let remote = RemoteService::new(db.clone(), app.handle().clone(), &app_data, &resource_dir);
+            let remote_auto_start = db.remote_auto_start()?;
+            let startup_remote = remote.clone();
             let media_stream = Arc::new(MediaStreamService::new()?);
             let services = AppServices {
                 db,
@@ -932,11 +947,14 @@ pub fn run() {
                 metadata: Arc::new(WikipediaMetadataClient::new()?),
                 player: Arc::new(PlayerService::discover()),
                 media_stream,
-                remote,
+                remote: remote.clone(),
             };
             app.manage(services.clone());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                if remote_auto_start {
+                    let _ = startup_remote.start().await;
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(450)).await;
                 spawn_scan(handle, services, "startup".into());
             });
@@ -971,6 +989,7 @@ pub fn run() {
             remote_status,
             remote_start,
             remote_stop,
+            remote_set_auto_start,
             remote_create_pairing,
             remote_approve_pairing,
             remote_reject_pairing,
