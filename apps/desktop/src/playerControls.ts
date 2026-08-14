@@ -4,6 +4,16 @@ export const PLAYER_MAX_VOLUME = 1;
 export const PLAYER_VOLUME_DETENT = 0.5;
 export const PLAYER_VOLUME_DETENT_MS = 420;
 
+export interface PlayerChromeState {
+  errorVisible: boolean;
+  imagePanelOpen: boolean;
+  settingsPanelOpen: boolean;
+}
+
+export function shouldPinPlayerChrome(state: PlayerChromeState) {
+  return state.errorVisible || state.imagePanelOpen || state.settingsPanelOpen;
+}
+
 export function seekSecondsForPoint(clientX: number, left: number, width: number) {
   const direction = clientX < left + width / 2 ? -1 : 1;
   return direction * PLAYER_SEEK_SECONDS;

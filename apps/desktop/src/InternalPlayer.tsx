@@ -14,6 +14,7 @@ import {
   playerVolumeRouting,
   resolveVolumeWithDetent,
   seekSecondsForPoint,
+  shouldPinPlayerChrome,
 } from './playerControls';
 
 export interface InternalPlayerSource {
@@ -144,6 +145,20 @@ export function InternalPlayer({
     }
   }, []);
 
+  const showControlsTemporarily = useCallback(() => {
+    clearControlsTimer();
+    setControlsVisible(true);
+    if (shouldPinPlayerChrome({
+      errorVisible: Boolean(error),
+      imagePanelOpen: showImagePanel,
+      settingsPanelOpen: showSettingsPanel,
+    })) return;
+    controlsTimerRef.current = window.setTimeout(() => {
+      setControlsVisible(false);
+      controlsTimerRef.current = null;
+    }, CONTROLS_HIDE_DELAY_MS);
+  }, [clearControlsTimer, error, showImagePanel, showSettingsPanel]);
+
   const restoreWindowFullscreenMode = useCallback(async () => {
     const initialFullscreen = initialWindowFullscreenRef.current;
     try {
@@ -267,9 +282,9 @@ export function InternalPlayer({
       video.playbackRate = 2;
       holdActiveRef.current = true;
       setFastForward(true);
-      setControlsVisible(true);
+      showControlsTemporarily();
     }, PLAYER_HOLD_DELAY_MS);
-  }, []);
+  }, [showControlsTemporarily]);
 
   const handleSurfacePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     if (Math.hypot(event.clientX - pressStartRef.current.x, event.clientY - pressStartRef.current.y) < 12) return;
@@ -332,7 +347,7 @@ export function InternalPlayer({
           await document.exitFullscreen().catch(() => {});
         }
         setFullscreen(next);
-        setControlsVisible(true);
+        showControlsTemporarily();
         return;
       } catch {
         /* Browser fullscreen is the fallback when the native call is unavailable. */
@@ -346,12 +361,12 @@ export function InternalPlayer({
           await target.requestFullscreen();
           setFullscreen(true);
         }
-        setControlsVisible(true);
+        showControlsTemporarily();
       } catch {
         setError('No se pudo activar pantalla completa.');
       }
     })();
-  }, []);
+  }, [showControlsTemporarily]);
 
   useEffect(() => {
     const height = source.detail.technical.height;
@@ -408,7 +423,6 @@ export function InternalPlayer({
   const beginNextPrompt = useCallback(() => {
     if (!nextUp || nextDismissed || nextPromptVisible) return;
     setNextPromptVisible(true);
-    setControlsVisible(true);
   }, [nextDismissed, nextPromptVisible, nextUp]);
 
   const cancelNextPrompt = useCallback(() => {
@@ -488,7 +502,6 @@ export function InternalPlayer({
   const toggleSettingsPanel = useCallback(() => {
     setShowImagePanel(false);
     setShowSettingsPanel(value => !value);
-    setControlsVisible(true);
   }, []);
 
   useEffect(() => {
@@ -560,33 +573,20 @@ export function InternalPlayer({
   }, [source.detail.id]);
 
   useEffect(() => {
-    clearControlsTimer();
-    if (!playing || showImagePanel || showSettingsPanel || nextPromptVisible || error) {
-      setControlsVisible(true);
-      return;
-    }
-    if (controlsVisible) {
-      controlsTimerRef.current = window.setTimeout(() => {
-        setControlsVisible(false);
-        controlsTimerRef.current = null;
-      }, CONTROLS_HIDE_DELAY_MS);
-    }
+    showControlsTemporarily();
     return clearControlsTimer;
-  }, [clearControlsTimer, controlsVisible, error, nextPromptVisible, playing, showImagePanel, showSettingsPanel]);
+  }, [clearControlsTimer, showControlsTemporarily]);
 
   useEffect(() => {
-    const revealControls = () => {
-      setControlsVisible(true);
-    };
     const onMove = (event: MouseEvent) => {
       const last = lastPointerRef.current;
       if (last.ready && Math.abs(event.clientX - last.x) < 2 && Math.abs(event.clientY - last.y) < 2) return;
       lastPointerRef.current = { x: event.clientX, y: event.clientY, ready: true };
-      revealControls();
+      showControlsTemporarily();
     };
     const onFullscreen = () => {
       setFullscreen(Boolean(document.fullscreenElement));
-      revealControls();
+      showControlsTemporarily();
     };
     window.addEventListener('mousemove', onMove);
     document.addEventListener('fullscreenchange', onFullscreen);
@@ -594,7 +594,7 @@ export function InternalPlayer({
       window.removeEventListener('mousemove', onMove);
       document.removeEventListener('fullscreenchange', onFullscreen);
     };
-  }, []);
+  }, [showControlsTemporarily]);
 
   useEffect(() => {
     void (async () => {

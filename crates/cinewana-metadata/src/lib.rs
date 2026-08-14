@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
+mod tmdb;
+
+pub use tmdb::{CachedArtwork, TmdbMetadataClient};
+
 pub const WIKIPEDIA_USER_AGENT: &str =
     "CINE-WANA/0.1.0 (local desktop metadata importer; https://github.com/Lucasleiva1/cinewana)";
 
@@ -190,7 +194,7 @@ pub fn write_metadata_json(
     let key = fingerprint.chars().take(48).collect::<String>();
     let path = directory.join(format!("{key}.metadata.json"));
     let sidecar = MetadataJson {
-        provider: "wikipedia",
+        provider: metadata.provider.as_str(),
         imported_at: Utc::now().to_rfc3339(),
         metadata,
     };
@@ -201,7 +205,7 @@ pub fn write_metadata_json(
 
 #[derive(Debug, Serialize)]
 struct MetadataJson<'a> {
-    provider: &'static str,
+    provider: &'a str,
     imported_at: String,
     metadata: &'a ImportedMediaMetadata,
 }
@@ -288,6 +292,7 @@ fn page_to_candidate(
         year,
         description,
         source_url: source_url(language, &page.title),
+        poster_url: None,
     })
 }
 
@@ -303,6 +308,7 @@ fn page_to_imported(
         return None;
     }
     Some(ImportedMediaMetadata {
+        provider: "wikipedia".to_owned(),
         title: candidate
             .map(|candidate| candidate.title.clone())
             .unwrap_or_else(|| clean_page_title(&page.title)),
@@ -314,11 +320,14 @@ fn page_to_imported(
             ))
         }),
         overview,
+        genres: vec![],
         cast,
         source_url: candidate
             .map(|candidate| candidate.source_url.clone())
             .unwrap_or_else(|| source_url(language, &page.title)),
         source_language: language.to_owned(),
+        poster_url: None,
+        backdrop_url: None,
     })
 }
 

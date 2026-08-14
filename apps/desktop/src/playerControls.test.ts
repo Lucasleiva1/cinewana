@@ -4,7 +4,20 @@ import {
   playerVolumeRouting,
   resolveVolumeWithDetent,
   seekSecondsForPoint,
+  shouldPinPlayerChrome,
 } from './playerControls';
+
+describe('player chrome auto-hide', () => {
+  it('does not pin controls for a next-up recommendation or a paused video', () => {
+    expect(shouldPinPlayerChrome({ errorVisible: false, imagePanelOpen: false, settingsPanelOpen: false })).toBe(false);
+  });
+
+  it('pins controls only for errors and open interactive panels', () => {
+    expect(shouldPinPlayerChrome({ errorVisible: true, imagePanelOpen: false, settingsPanelOpen: false })).toBe(true);
+    expect(shouldPinPlayerChrome({ errorVisible: false, imagePanelOpen: true, settingsPanelOpen: false })).toBe(true);
+    expect(shouldPinPlayerChrome({ errorVisible: false, imagePanelOpen: false, settingsPanelOpen: true })).toBe(true);
+  });
+});
 
 describe('player surface gestures', () => {
   it('seeks backward on the left and forward on the right', () => {

@@ -22,12 +22,12 @@ export interface HomeDto { heroes: MediaSummary[]; continueWatching: MediaSummar
 export interface LibraryRoot { id:string; displayName:string; enabled:boolean; recursive:boolean; watchEnabled:boolean; status:RootStatus; lastScanAt?:string; disconnectedCount:number; localPath?:string }
 export interface Account { id:string; name:string }
 export interface ScanProgress { jobId?:string; running:boolean; cancelRequested:boolean; found:number; processed:number; skipped:number; errors:number; currentFile?:string; percent:number; message?:string }
-export interface IdentificationReview { mediaId:string; fileName:string; kind:MediaKind; title:string; seriesTitle?:string; seasonNumber?:number; episodeNumber?:number; reason:string }
+export interface IdentificationReview { mediaId:string; fileName:string; kind:MediaKind; title:string; seriesTitle?:string; seasonNumber?:number; episodeNumber?:number; reason:string; identificationPending:boolean; metadataStatus:string; metadataCandidates:MediaMetadataCandidate[] }
 export interface ClassificationUpdate { kind:MediaKind; title:string; seriesTitle?:string|null; seasonNumber?:number|null; episodeNumber?:number|null }
 export interface Bootstrap { roots:LibraryRoot[]; scan:ScanProgress; home:HomeDto; accounts:Account[]; activeAccount?:Account|null; ffprobeAvailable:boolean; playerAvailable:boolean; identificationReviews:IdentificationReview[] }
 export interface MediaTrack { id:string; trackType:string; streamIndex:number; language?:string; title?:string; codec?:string; channels?:number; defaultTrack:boolean; forcedTrack:boolean; external:boolean }
 export interface MediaMetadataCandidate {
-  id:string; language:string; pageId:number; title:string; year?:number|null; description?:string|null; sourceUrl:string;
+  id:string; language:string; pageId:number; title:string; year?:number|null; description?:string|null; sourceUrl:string; posterUrl?:string|null;
 }
 export interface MediaDetail extends MediaSummary {
   overview?:string; genres:string[]; cast:string[]; runtimeMs?:number; tracks:MediaTrack[]; fileName:string;

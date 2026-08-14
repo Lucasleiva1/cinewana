@@ -44,6 +44,8 @@ pub struct MetadataImportTarget {
     pub title: String,
     pub year: Option<i32>,
     pub kind: MediaKind,
+    pub season_number: Option<i32>,
+    pub episode_number: Option<i32>,
     pub file_name: String,
     pub fingerprint: String,
 }
@@ -78,6 +80,40 @@ impl Database {
         };
         database.migrate()?;
         Ok(database)
+    }
+
+    pub fn rebase_tmdb_cache(&self, cache_root: &Path) -> Result<()> {
+        let conn = self.connection.lock();
+        let mut statement = conn.prepare(
+            "SELECT id,poster_cache_key,backdrop_cache_key,metadata_json_path
+             FROM media_items WHERE metadata_source_url LIKE 'https://www.themoviedb.org/%'",
+        )?;
+        let entries = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        for (media_id, poster, backdrop, metadata_json) in entries {
+            let poster = rebase_cache_file(poster, cache_root, &["tmdb", "posters"]);
+            let backdrop = rebase_cache_file(backdrop, cache_root, &["tmdb", "backdrops"]);
+            let metadata_json = rebase_cache_file(metadata_json, cache_root, &["metadata"]);
+            let artwork_missing = poster
+                .as_deref()
+                .is_some_and(|path| !Path::new(path).is_file());
+            conn.execute(
+                "UPDATE media_items SET poster_cache_key=?1,backdrop_cache_key=?2,
+                 metadata_json_path=?3,metadata_status=CASE WHEN ?4=1 THEN 'artwork_missing' ELSE metadata_status END
+                 WHERE id=?5",
+                params![poster, backdrop, metadata_json, artwork_missing, media_id],
+            )?;
+        }
+        Ok(())
     }
 
     fn migrate(&self) -> Result<()> {
@@ -539,8 +575,8 @@ impl Database {
     ) -> Result<()> {
         self.connection.lock().execute(
             "UPDATE media_items SET
-             poster_cache_key=CASE WHEN manual_metadata=1 AND COALESCE(poster_cache_key,'')<>'' THEN poster_cache_key ELSE ?1 END,
-             backdrop_cache_key=CASE WHEN manual_metadata=1 AND COALESCE(backdrop_cache_key,'')<>'' THEN backdrop_cache_key ELSE ?2 END,
+             poster_cache_key=CASE WHEN (manual_metadata=1 OR COALESCE(metadata_source_url,'') LIKE 'https://www.themoviedb.org/%') AND COALESCE(poster_cache_key,'')<>'' THEN poster_cache_key ELSE ?1 END,
+             backdrop_cache_key=CASE WHEN (manual_metadata=1 OR COALESCE(metadata_source_url,'') LIKE 'https://www.themoviedb.org/%') AND COALESCE(backdrop_cache_key,'')<>'' THEN backdrop_cache_key ELSE ?2 END,
              preview_cache_key=?3,updated_at=?4 WHERE id=?5",
             params![poster,backdrop,preview,Utc::now().to_rfc3339(),media_id],
         )?;
@@ -737,23 +773,39 @@ impl Database {
             _ => items.sort_by(|a, b| b.added_at.cmp(&a.added_at)),
         }
         let offset = query.offset.unwrap_or(0) as usize;
-        let limit = query.limit.unwrap_or(500).min(2000) as usize;
-        Ok(items.into_iter().skip(offset).take(limit).collect())
+        let items = items.into_iter().skip(offset);
+        Ok(match query.limit {
+            Some(limit) => items.take(limit.min(2000) as usize).collect(),
+            None => items.collect(),
+        })
     }
 
     pub fn identification_reviews(&self) -> Result<Vec<IdentificationReview>> {
         let conn = self.connection.lock();
         let mut statement = conn.prepare(
             "SELECT m.id,f.file_name,m.kind,m.title,m.series_title,m.season_number,m.episode_number,
-                    COALESCE(m.review_reason,'Identificacion pendiente')
+                    m.review_reason,m.needs_review,m.metadata_status,m.metadata_candidates_json
              FROM media_items m
              JOIN media_files f ON f.media_item_id=m.id
-             WHERE m.needs_review=1 AND f.offline=0
+             WHERE (m.needs_review=1 OR m.metadata_status IN ('ambiguous','not_found','artwork_missing')) AND f.offline=0
              ORDER BY lower(f.file_name)",
         )?;
         statement
             .query_map([], |row| {
                 let kind: String = row.get(2)?;
+                let identification_pending = row.get::<_, i64>(8)? != 0;
+                let metadata_status: String = row.get(9)?;
+                let review_reason: Option<String> = row.get(7)?;
+                let reason = if identification_pending {
+                    review_reason.unwrap_or_else(|| "Identificación pendiente".to_owned())
+                } else if metadata_status == "ambiguous" {
+                    "TMDB encontró varias películas o series posibles. Elegí la portada correcta o corregí el título.".to_owned()
+                } else if metadata_status == "not_found" {
+                    "TMDB no encontró una coincidencia segura. Corregí el título y volvé a buscar.".to_owned()
+                } else {
+                    "No se encontró la portada guardada. Volvé a descargarla desde TMDB o restaurá la carpeta de caché.".to_owned()
+                };
+                let candidates_json: String = row.get(10)?;
                 Ok(IdentificationReview {
                     media_id: row.get(0)?,
                     file_name: row.get(1)?,
@@ -766,7 +818,11 @@ impl Database {
                     series_title: row.get(4)?,
                     season_number: row.get(5)?,
                     episode_number: row.get(6)?,
-                    reason: row.get(7)?,
+                    reason,
+                    identification_pending,
+                    metadata_status,
+                    metadata_candidates: serde_json::from_str(&candidates_json)
+                        .unwrap_or_default(),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -883,7 +939,13 @@ impl Database {
     }
 
     pub fn home(&self, account_id: Option<&str>) -> Result<HomeDto> {
-        let all = self.catalog(account_id, &CatalogQuery::default())?;
+        let all = self.catalog(
+            account_id,
+            &CatalogQuery {
+                limit: None,
+                ..CatalogQuery::default()
+            },
+        )?;
         let mut movies: Vec<_> = all
             .iter()
             .filter(|m| m.kind == MediaKind::Movie)
@@ -1146,14 +1208,17 @@ impl Database {
                     [id],
                     |row| row.get(0),
                 )?;
-                let genres = normalize_tags(serde_json::from_str(&genres_json).unwrap_or_default(), 12);
-                Ok(ranked_recommendations_locked(&conn, account_id, id, &genres, &source)?
-                    .into_iter()
-                    .find(|item| {
-                        item.kind == MediaKind::Movie
-                            && !item.completed
-                            && item.progress_percent <= f64::EPSILON
-                    }))
+                let genres =
+                    normalize_tags(serde_json::from_str(&genres_json).unwrap_or_default(), 12);
+                Ok(
+                    ranked_recommendations_locked(&conn, account_id, id, &genres, &source)?
+                        .into_iter()
+                        .find(|item| {
+                            item.kind == MediaKind::Movie
+                                && !item.completed
+                                && item.progress_percent <= f64::EPSILON
+                        }),
+                )
             }
         }
     }
@@ -1207,7 +1272,7 @@ impl Database {
         self.connection
             .lock()
             .query_row(
-                "SELECT m.id,COALESCE(m.series_title,m.title),m.year,m.kind,f.file_name,f.fingerprint
+                "SELECT m.id,COALESCE(m.series_title,m.title),m.year,m.kind,m.season_number,m.episode_number,f.file_name,f.fingerprint
                  FROM media_items m JOIN media_files f ON f.media_item_id=m.id
                  WHERE m.id=?1 AND f.offline=0 LIMIT 1",
                 [media_id],
@@ -1222,8 +1287,10 @@ impl Database {
                         } else {
                             MediaKind::Movie
                         },
-                        file_name: row.get(4)?,
-                        fingerprint: row.get(5)?,
+                        season_number: row.get(4)?,
+                        episode_number: row.get(5)?,
+                        file_name: row.get(6)?,
+                        fingerprint: row.get(7)?,
                     })
                 },
             )
@@ -1236,7 +1303,7 @@ impl Database {
             .connection
             .lock()
             .query_row(
-                "SELECT manual_metadata,metadata_status,metadata_source_url,metadata_checked_at FROM media_items WHERE id=?1",
+                "SELECT manual_metadata,metadata_status,metadata_source_url,metadata_checked_at,metadata_candidates_json,metadata_imported_at FROM media_items WHERE id=?1",
                 [media_id],
                 |row| {
                     Ok((
@@ -1244,14 +1311,35 @@ impl Database {
                         row.get::<_, String>(1)?,
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((manual, status, source_url, checked_at)) = row else {
+        let Some((manual, status, source_url, _checked_at, candidates_json, imported_at)) = row
+        else {
             return Ok(false);
         };
-        Ok(!manual && status == "pending" && source_url.is_none() && checked_at.is_none())
+        let legacy_wikipedia = source_url
+            .as_deref()
+            .is_some_and(|url| url.contains("wikipedia.org/"));
+        let legacy_candidates = status == "ambiguous" && !candidates_json.contains("tmdb:");
+        let stale_tmdb = status == "imported"
+            && source_url
+                .as_deref()
+                .is_some_and(|url| url.contains("themoviedb.org/"))
+            && imported_at
+                .as_deref()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .is_some_and(|imported| {
+                    Utc::now().signed_duration_since(imported) >= chrono::Duration::days(180)
+                });
+        Ok(!manual
+            && ((legacy_wikipedia && status == "imported")
+                || legacy_candidates
+                || stale_tmdb
+                || (status == "pending" && source_url.is_none())))
     }
 
     pub fn apply_imported_metadata(
@@ -1259,14 +1347,31 @@ impl Database {
         media_id: &str,
         metadata: &ImportedMediaMetadata,
         metadata_json_path: Option<&str>,
+        poster_path: Option<&str>,
+        backdrop_path: Option<&str>,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
+        let genres = normalize_tags(metadata.genres.clone(), 12);
         let cast = normalize_tags(metadata.cast.clone(), 32);
         self.connection.lock().execute(
-            "UPDATE media_items SET overview=COALESCE(?1,overview),cast_json=?2,metadata_status='imported',metadata_source_url=?3,metadata_imported_at=?4,metadata_checked_at=?4,metadata_candidates_json='[]',metadata_json_path=?5,updated_at=?4 WHERE id=?6",
+            "UPDATE media_items SET
+             title=CASE WHEN manual_metadata=0 AND COALESCE(?1,'')<>'' THEN ?1 ELSE title END,
+             sort_title=CASE WHEN manual_metadata=0 AND COALESCE(?1,'')<>'' THEN LOWER(?1) ELSE sort_title END,
+             year=CASE WHEN manual_metadata=0 THEN COALESCE(?2,year) ELSE year END,
+             overview=CASE WHEN manual_metadata=0 THEN COALESCE(?3,overview) ELSE overview END,
+             genres_json=CASE WHEN manual_metadata=0 AND ?4<>'[]' THEN ?4 ELSE genres_json END,
+             cast_json=CASE WHEN manual_metadata=0 AND ?5<>'[]' THEN ?5 ELSE cast_json END,
+             poster_cache_key=COALESCE(?6,poster_cache_key),backdrop_cache_key=COALESCE(?7,backdrop_cache_key),
+             metadata_status='imported',metadata_source_url=?8,metadata_imported_at=?9,metadata_checked_at=?9,
+             metadata_candidates_json='[]',metadata_json_path=?10,updated_at=?9 WHERE id=?11",
             params![
+                metadata.title,
+                metadata.year,
                 metadata.overview,
+                serde_json::to_string(&genres)?,
                 serde_json::to_string(&cast)?,
+                poster_path,
+                backdrop_path,
                 metadata.source_url,
                 now,
                 metadata_json_path,
@@ -1283,7 +1388,7 @@ impl Database {
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let status = if candidates.is_empty() {
-            "pending"
+            "not_found"
         } else {
             "ambiguous"
         };
@@ -1453,16 +1558,12 @@ fn recommendations_locked(
     source_genres: &[String],
     source: &MediaSummary,
 ) -> Result<Vec<MediaSummary>> {
-    Ok(ranked_recommendations_locked(
-        conn,
-        account_id,
-        media_id,
-        source_genres,
-        source,
-    )?
-    .into_iter()
-    .take(12)
-    .collect())
+    Ok(
+        ranked_recommendations_locked(conn, account_id, media_id, source_genres, source)?
+            .into_iter()
+            .take(12)
+            .collect(),
+    )
 }
 
 fn ranked_recommendations_locked(
@@ -1863,6 +1964,26 @@ fn update_media_and_file(
     Ok(())
 }
 
+fn rebase_cache_file(
+    current: Option<String>,
+    cache_root: &Path,
+    relative_directory: &[&str],
+) -> Option<String> {
+    let current = current?;
+    let normalized = current.replace('\\', "/").to_lowercase();
+    let marker = relative_directory.join("/").to_lowercase();
+    if !normalized.contains(&marker) {
+        return Some(current);
+    }
+    let file_name = Path::new(&current).file_name()?;
+    let mut rebased = cache_root.to_path_buf();
+    for component in relative_directory {
+        rebased.push(component);
+    }
+    rebased.push(file_name);
+    Some(rebased.to_string_lossy().into_owned())
+}
+
 fn kind_text(kind: &MediaKind) -> &'static str {
     match kind {
         MediaKind::Movie => "movie",
@@ -1908,6 +2029,53 @@ mod tests {
             technical: MediaTechnical::default(),
             external_subtitles: vec![],
         }
+    }
+
+    #[test]
+    fn exposes_ambiguous_tmdb_posters_in_the_review_queue() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        let outcome = db
+            .upsert_file(
+                &root,
+                "scan-1",
+                &discovered_file(r"D:\media\Alien.1979.mkv", "alien-1979"),
+            )
+            .unwrap();
+        let candidate = MediaMetadataCandidate {
+            id: "tmdb:movie:348".into(),
+            language: "es-AR".into(),
+            page_id: 348,
+            title: "Alien: El octavo pasajero".into(),
+            year: Some(1979),
+            description: Some("La tripulación encuentra una forma de vida desconocida.".into()),
+            source_url: "https://www.themoviedb.org/movie/348".into(),
+            poster_url: Some("https://image.tmdb.org/t/p/w342/poster.jpg".into()),
+        };
+        db.store_metadata_candidates(&outcome.media_id, &[candidate.clone()])
+            .unwrap();
+        assert!(!db.should_auto_import_metadata(&outcome.media_id).unwrap());
+
+        let reviews = db.identification_reviews().unwrap();
+        assert_eq!(reviews.len(), 1);
+        assert!(!reviews[0].identification_pending);
+        assert_eq!(reviews[0].metadata_status, "ambiguous");
+        assert_eq!(reviews[0].metadata_candidates, vec![candidate]);
+
+        db.connection
+            .lock()
+            .execute(
+                "UPDATE media_items SET metadata_status='imported',metadata_source_url=?1,metadata_imported_at=?2 WHERE id=?3",
+                params![
+                    "https://www.themoviedb.org/movie/348",
+                    (Utc::now() - chrono::Duration::days(181)).to_rfc3339(),
+                    outcome.media_id
+                ],
+            )
+            .unwrap();
+        assert!(db.should_auto_import_metadata(&outcome.media_id).unwrap());
+        assert!(db.identification_reviews().unwrap().is_empty());
     }
 
     #[test]
@@ -2159,20 +2327,21 @@ mod tests {
             .next_up(Some(&account.id), &episode(1, 1).id)
             .unwrap()
             .unwrap();
-        assert_eq!((second.season_number, second.episode_number), (Some(1), Some(2)));
+        assert_eq!(
+            (second.season_number, second.episode_number),
+            (Some(1), Some(2))
+        );
 
-        let next_season = db
-            .next_up(Some(&account.id), &second.id)
-            .unwrap()
-            .unwrap();
+        let next_season = db.next_up(Some(&account.id), &second.id).unwrap().unwrap();
         assert_eq!(
             (next_season.season_number, next_season.episode_number),
             (Some(2), Some(1))
         );
-        assert!(db
-            .next_up(Some(&account.id), &next_season.id)
-            .unwrap()
-            .is_none());
+        assert!(
+            db.next_up(Some(&account.id), &next_season.id)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -2195,7 +2364,14 @@ mod tests {
         let catalog = db
             .catalog(Some(&account.id), &CatalogQuery::default())
             .unwrap();
-        let id = |title: &str| catalog.iter().find(|item| item.title == title).unwrap().id.clone();
+        let id = |title: &str| {
+            catalog
+                .iter()
+                .find(|item| item.title == title)
+                .unwrap()
+                .id
+                .clone()
+        };
         let source_id = id("Source Movie");
         let watched_id = id("Watched Match");
         let unwatched_match_id = id("Unwatched Match");
@@ -2212,10 +2388,7 @@ mod tests {
         db.save_progress(&account.id, &watched_id, 100, 100)
             .unwrap();
 
-        let recommendation = db
-            .next_up(Some(&account.id), &source_id)
-            .unwrap()
-            .unwrap();
+        let recommendation = db.next_up(Some(&account.id), &source_id).unwrap().unwrap();
         assert_eq!(recommendation.id, unwatched_match_id);
         assert_eq!(recommendation.progress_percent, 0.0);
         assert!(!recommendation.completed);

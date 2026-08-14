@@ -7,10 +7,11 @@ use cinewana_core::{
     MediaSummary, PlayerCommand, PlayerState, ScanProgress,
 };
 use cinewana_database::{Database, MetadataImportTarget};
-use cinewana_metadata::{MetadataSearchOutcome, WikipediaMetadataClient};
+use cinewana_metadata::{MetadataSearchOutcome, TmdbMetadataClient};
 use cinewana_player::PlayerService;
 use media_stream::MediaStreamService;
 use parking_lot::Mutex;
+use remote::{RemotePlayerSnapshot, RemoteService, RemoteStatusDto};
 use std::{
     path::PathBuf,
     process::Command,
@@ -21,7 +22,6 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
-use remote::{RemotePlayerSnapshot, RemoteService, RemoteStatusDto};
 
 #[derive(Clone)]
 struct AppServices {
@@ -32,7 +32,7 @@ struct AppServices {
     ffmpeg: Option<PathBuf>,
     ffprobe: Option<PathBuf>,
     cache_dir: PathBuf,
-    metadata: Arc<WikipediaMetadataClient>,
+    metadata: Arc<TmdbMetadataClient>,
     player: Arc<PlayerService>,
     media_stream: Arc<MediaStreamService>,
     remote: Arc<RemoteService>,
@@ -57,10 +57,7 @@ fn bootstrap(state: State<'_, AppServices>) -> Result<BootstrapDto, String> {
         active_account,
         ffprobe_available: state.ffprobe.is_some(),
         player_available: state.player.available(),
-        identification_reviews: state
-            .db
-            .identification_reviews()
-            .map_err(error_string)?,
+        identification_reviews: state.db.identification_reviews().map_err(error_string)?,
     })
 }
 
@@ -115,7 +112,7 @@ fn media_detail(id: String, state: State<'_, AppServices>) -> Result<Option<Medi
 }
 
 #[tauri::command]
-fn resolve_identification(
+async fn resolve_identification(
     media_id: String,
     classification: ClassificationUpdate,
     state: State<'_, AppServices>,
@@ -124,6 +121,11 @@ fn resolve_identification(
         .db
         .resolve_identification(&media_id, &classification)
         .map_err(error_string)?;
+    if let Some(target) = state.db.metadata_target(&media_id).map_err(error_string)? {
+        import_metadata_for_target(state.inner(), &target)
+            .await
+            .map_err(error_string)?;
+    }
     write_identification_cache(state.inner(), &media_id).map_err(error_string)
 }
 
@@ -196,13 +198,9 @@ async fn apply_metadata_candidate(
         .import_candidate(&candidate)
         .await
         .map_err(error_string)?
-        .ok_or_else(|| "No se pudo leer esa página de Wikipedia".to_string())?;
-    let json_path =
-        cinewana_metadata::write_metadata_json(&state.cache_dir, &target.fingerprint, &metadata)
-            .map_err(error_string)?;
-    state
-        .db
-        .apply_imported_metadata(&media_id, &metadata, Some(&json_path.to_string_lossy()))
+        .ok_or_else(|| "No se pudo leer esa coincidencia de TMDB".to_string())?;
+    persist_imported_metadata(state.inner(), &target, &metadata)
+        .await
         .map_err(error_string)?;
     write_identification_cache(state.inner(), &media_id).map_err(error_string)
 }
@@ -378,11 +376,7 @@ async fn rescan_media_item(
     }
     let outcome = state
         .db
-        .upsert_file(
-            &target.root_id,
-            &Uuid::new_v4().to_string(),
-            &file,
-        )
+        .upsert_file(&target.root_id, &Uuid::new_v4().to_string(), &file)
         .map_err(error_string)?;
     write_identification_cache(state.inner(), &outcome.media_id).map_err(error_string)?;
     let still_needs_review = state
@@ -575,7 +569,10 @@ fn remote_create_pairing(state: State<'_, AppServices>) -> Result<RemoteStatusDt
 }
 
 #[tauri::command]
-fn remote_approve_pairing(request_id: String, state: State<'_, AppServices>) -> Result<RemoteStatusDto, String> {
+fn remote_approve_pairing(
+    request_id: String,
+    state: State<'_, AppServices>,
+) -> Result<RemoteStatusDto, String> {
     state.remote.approve(&request_id)
 }
 
@@ -585,7 +582,10 @@ fn remote_reject_pairing(request_id: String, state: State<'_, AppServices>) -> R
 }
 
 #[tauri::command]
-fn remote_revoke_device(device_id: String, state: State<'_, AppServices>) -> Result<RemoteStatusDto, String> {
+fn remote_revoke_device(
+    device_id: String,
+    state: State<'_, AppServices>,
+) -> Result<RemoteStatusDto, String> {
     state.remote.revoke(&device_id)
 }
 
@@ -621,20 +621,17 @@ async fn import_metadata_for_target(
 ) -> anyhow::Result<()> {
     let outcome = services
         .metadata
-        .search_movie(&target.title, target.year)
+        .search_media(
+            &target.title,
+            target.year,
+            &target.kind,
+            target.season_number,
+            target.episode_number,
+        )
         .await?;
     match outcome {
         MetadataSearchOutcome::Imported(metadata) => {
-            let json_path = cinewana_metadata::write_metadata_json(
-                &services.cache_dir,
-                &target.fingerprint,
-                &metadata,
-            )?;
-            services.db.apply_imported_metadata(
-                &target.media_id,
-                &metadata,
-                Some(&json_path.to_string_lossy()),
-            )?;
+            persist_imported_metadata(services, target, &metadata).await?;
         }
         MetadataSearchOutcome::Ambiguous(candidates) => {
             services
@@ -647,6 +644,35 @@ async fn import_metadata_for_target(
                 .store_metadata_candidates(&target.media_id, &[])?;
         }
     }
+    Ok(())
+}
+
+async fn persist_imported_metadata(
+    services: &AppServices,
+    target: &MetadataImportTarget,
+    metadata: &cinewana_core::ImportedMediaMetadata,
+) -> anyhow::Result<()> {
+    let json_path =
+        cinewana_metadata::write_metadata_json(&services.cache_dir, &target.fingerprint, metadata)?;
+    let artwork = services
+        .metadata
+        .cache_artwork(&services.cache_dir, &target.fingerprint, metadata)
+        .await?;
+    let poster_path = artwork
+        .poster_path
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
+    let backdrop_path = artwork
+        .backdrop_path
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned());
+    services.db.apply_imported_metadata(
+        &target.media_id,
+        metadata,
+        Some(&json_path.to_string_lossy()),
+        poster_path.as_deref(),
+        backdrop_path.as_deref(),
+    )?;
     Ok(())
 }
 
@@ -738,17 +764,31 @@ async fn run_scan(app: &AppHandle, services: &AppServices, reason: &str) -> anyh
             let path_text = path.to_string_lossy().into_owned();
             if let Ok(state) = cinewana_scanner::file_state(&path) {
                 let parsed = cinewana_core::parse_media_name(&path);
-                if let Some(outcome) = services
-                    .db
-                    .reconcile_unchanged_file(
-                        &scan_id,
-                        &path_text,
-                        state.file_size,
-                        state.modified_at,
-                        &parsed,
-                    )?
-                {
+                if let Some(outcome) = services.db.reconcile_unchanged_file(
+                    &scan_id,
+                    &path_text,
+                    state.file_size,
+                    state.modified_at,
+                    &parsed,
+                )? {
                     local_skipped += 1;
+                    if services.metadata.configured()
+                        && services
+                            .db
+                            .should_auto_import_metadata(&outcome.media_id)
+                            .unwrap_or(false)
+                    {
+                        if let Ok(Some(target)) = services.db.metadata_target(&outcome.media_id) {
+                            {
+                                let mut p = services.progress.lock();
+                                p.message =
+                                    Some(format!("Buscando portada oficial: {}", target.file_name));
+                                let _ = app.emit("scan-progress", p.clone());
+                            }
+                            let _ = import_metadata_for_target(services, &target).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        }
+                    }
                     let _ = write_identification_cache(services, &outcome.media_id);
                     continue;
                 }
@@ -793,21 +833,24 @@ async fn run_scan(app: &AppHandle, services: &AppServices, reason: &str) -> anyh
                                 Err(_) => local_errors += 1,
                             }
                         }
-                        if services
-                            .db
-                            .should_auto_import_metadata(&outcome.media_id)
-                            .unwrap_or(false)
+                        if services.metadata.configured()
+                            && services
+                                .db
+                                .should_auto_import_metadata(&outcome.media_id)
+                                .unwrap_or(false)
                         {
                             if let Ok(Some(target)) = services.db.metadata_target(&outcome.media_id)
                             {
                                 {
                                     let mut p = services.progress.lock();
-                                    p.message =
-                                        Some(format!("Buscando información: {}", target.file_name));
+                                    p.message = Some(format!(
+                                        "Buscando portada oficial: {}",
+                                        target.file_name
+                                    ));
                                     let _ = app.emit("scan-progress", p.clone());
                                 }
                                 let _ = import_metadata_for_target(services, &target).await;
-                                tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+                                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                             }
                         }
                         let _ = write_identification_cache(services, &outcome.media_id);
@@ -929,10 +972,13 @@ pub fn run() {
         .setup(|app| {
             let app_data = app.path().app_data_dir()?;
             let resource_dir = app.path().resource_dir()?;
+            let cache_dir = app_data.join("cache");
             let db = Arc::new(Database::open(app_data.join("cine-wana.db"))?);
+            db.rebase_tmdb_cache(&cache_dir)?;
             db.seed_root(DEFAULT_LIBRARY_ROOT)?;
             let ffmpeg = find_command("ffmpeg");
-            let remote = RemoteService::new(db.clone(), app.handle().clone(), &app_data, &resource_dir);
+            let remote =
+                RemoteService::new(db.clone(), app.handle().clone(), &app_data, &resource_dir);
             let remote_auto_start = db.remote_auto_start()?;
             let startup_remote = remote.clone();
             let media_stream = Arc::new(MediaStreamService::new()?);
@@ -943,8 +989,8 @@ pub fn run() {
                 cancel: Arc::new(AtomicBool::new(false)),
                 ffmpeg,
                 ffprobe: find_command("ffprobe"),
-                cache_dir: app_data.join("cache"),
-                metadata: Arc::new(WikipediaMetadataClient::new()?),
+                cache_dir,
+                metadata: Arc::new(TmdbMetadataClient::from_environment()?),
                 player: Arc::new(PlayerService::discover()),
                 media_stream,
                 remote: remote.clone(),

@@ -38,6 +38,7 @@
 - Reworked shadows/highlights adjustment as a tonal curve so shadow correction no longer washes the whole frame white
 - Added automatic numbered movie-sequel handoff for local sagas, with a cancellable next-up prompt near the end of playback
 - The next-content offer now appears during the final 60 seconds with explicit **Play now** and **Cancel** actions on both desktop and remote; cancellation hides the offer and disables autoplay
+- The next-content offer no longer pins the rest of the player interface: after mouse inactivity, the top bar, playback controls, central play button, and pointer disappear while the recommendation remains visible; moving the mouse reveals the controls again
 - Series now advance to the next numbered episode across seasons, while movies recommend a genre/year-related title with no progress in the active account
 - Prepared version 0.2.0 as an important signed updater release for the internal-player image correction workflow
 
@@ -72,6 +73,11 @@
 - Title cards keep center play behavior, while the title text opens the full title page
 - Added local genre-based recommendations and starter genre inference from filenames/paths
 - Added a no-key Wikipedia metadata importer in the Rust backend, with Spanish-first lookup, English fallback, cast extraction, source URL, cached metadata JSON, manual retry, and ambiguity selection
+- Replaced the active Wikipedia flow with TMDB while retaining the Wikipedia client disabled for rollback
+- Added persistent official TMDB posters, backdrops, localized details, genres, and cast, with movie and series/episode-specific lookup
+- Added poster-first ambiguity review in Settings, including candidate cover previews, missing-title errors, manual correction, and retry
+- Made TMDB metadata and artwork reusable without online lookup after import, independent of the Windows install directory, with cache-path rebasing for a transferred application-data directory
+- Added the official TMDB attribution and a 180-day refresh eligibility window for compliance with TMDB's cache terms
 
 ## Implemented for resilient series identification
 
@@ -85,6 +91,7 @@
 - Each review item can rescan only its original folder, reconnect a renamed video by fingerprint, and remove the warning immediately when the new name is unambiguous
 - Manual identification decisions survive later scans and rebuild the SQLite series/season/episode hierarchy without renaming or moving source media
 - Series cards now open a series view grouped by season with playable episode rows instead of opening an arbitrary episode directly
+- The library footer now separates movie, series, and chapter totals; series cards show chapter totals with a per-season breakdown, and every season header reports its own chapter count
 - Episode rows display a generated video thumbnail, play/detail actions, watch progress, and a short stored description when available
 - Unchanged files are reconciled from size and modification time before FFprobe/fingerprint work, avoiding repeated full analysis and duplicate catalog records
 - CINE WANA writes lightweight identification/description JSON manifests only to its private application cache; configured media roots remain read-only
@@ -93,7 +100,7 @@
 ## Pending after the functional media pass
 
 - File-system watcher/debounce and scan concurrency tuning
-- Local NFO/images, optional TMDB official posters, richer online posters, and manual match correction
+- Local NFO/images and optional manual image overrides beyond the completed TMDB poster workflow
 - Fine-grained audio/subtitle selectors and persisted image profiles
 - Final visual refinements after the functional player is reviewed
 - Backup/export diagnostics and hardening
@@ -103,6 +110,7 @@
 - The internal player now opens the same complete Settings view in a side panel matching the Image panel width, so playback can continue while remote control and other options are managed
 - Remote-control Settings now includes a persistent **Siempre activo** switch that starts the authenticated local service automatically when CINE WANA opens while preserving the manual activate/deactivate button
 - Prepared version 0.3.6 as the signed updater release for in-player access to the shared Settings view and persistent automatic remote-control startup
+- Prepared version 0.3.7 as the signed updater release for persistent TMDB artwork and metadata, poster-first identification review, player chrome inactivity fixes, and complete movie/series/chapter counts
 
 - Prepared version 0.2.1 as the installable Windows x64 test update that exposes **Configuración → Control remoto** in the desktop application
 - Prepared version 0.3.0-rc.1 as the important pre-final updater release for resilient series identification, targeted rescans, daily discovery rotation, and the local remote-control PWA

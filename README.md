@@ -11,6 +11,8 @@ powershell -ExecutionPolicy Bypass -File scripts/setup-windows.ps1
 powershell -ExecutionPolicy Bypass -File scripts/run-dev.ps1
 ```
 
+TMDB credentials are read from the ignored root `.env` file by the canonical Tauri development and build scripts. See [docs/METADATA.md](docs/METADATA.md) for the poster import, ambiguity review, persistence, reinstall, and transfer behavior.
+
 ## Verification
 
 ```powershell

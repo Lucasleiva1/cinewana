@@ -1,12 +1,12 @@
 {
   "name": "cine-wana",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "private": true,
   "packageManager": "pnpm@10.13.1",
   "scripts": {
     "dev": "corepack pnpm --filter @cine-wana/desktop dev",
-    "desktop:dev": "corepack pnpm --filter @cine-wana/desktop tauri dev",
-    "desktop:build": "corepack pnpm --filter @cine-wana/desktop tauri build",
+    "desktop:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-tauri.ps1 dev",
+    "desktop:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-tauri.ps1 build",
     "build": "corepack pnpm -r build",
     "test": "corepack pnpm -r test",
     "lint": "corepack pnpm -r lint",

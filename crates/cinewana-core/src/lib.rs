@@ -124,6 +124,8 @@ pub struct MediaMetadataCandidate {
     pub year: Option<i32>,
     pub description: Option<String>,
     pub source_url: String,
+    #[serde(default)]
+    pub poster_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -141,12 +143,16 @@ pub struct MediaMetadataUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportedMediaMetadata {
+    pub provider: String,
     pub title: String,
     pub year: Option<i32>,
     pub overview: Option<String>,
+    pub genres: Vec<String>,
     pub cast: Vec<String>,
     pub source_url: String,
     pub source_language: String,
+    pub poster_url: Option<String>,
+    pub backdrop_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -230,6 +236,9 @@ pub struct IdentificationReview {
     pub season_number: Option<i32>,
     pub episode_number: Option<i32>,
     pub reason: String,
+    pub identification_pending: bool,
+    pub metadata_status: String,
+    pub metadata_candidates: Vec<MediaMetadataCandidate>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
