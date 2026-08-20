@@ -90,35 +90,14 @@ impl TmdbMetadataClient {
         let response: SearchResponse = self
             .get_json(&format!("/search/{media_type}"), &query)
             .await?;
-        let mut scored = response
-            .results
-            .into_iter()
-            .filter_map(|result| {
-                let candidate_title = result.display_title()?.to_owned();
-                let candidate_year = result.year();
-                let score = score_result(title, year, &candidate_title, candidate_year);
-                if score < 38 {
-                    return None;
-                }
-                let source_url =
-                    tmdb_source_url(media_type, result.id, season_number, episode_number);
-                let context_id =
-                    candidate_context_id(media_type, result.id, season_number, episode_number);
-                Some((
-                    score,
-                    MediaMetadataCandidate {
-                        id: context_id,
-                        language: PRIMARY_LANGUAGE.to_owned(),
-                        page_id: result.id,
-                        title: candidate_title,
-                        year: candidate_year,
-                        description: non_empty(result.overview),
-                        source_url,
-                        poster_url: image_url("w342", result.poster_path.as_deref()),
-                    },
-                ))
-            })
-            .collect::<Vec<_>>();
+        let mut scored = score_search_results(
+            title,
+            year,
+            media_type,
+            season_number,
+            episode_number,
+            response.results,
+        );
         scored.sort_by(|left, right| {
             right
                 .0
@@ -164,6 +143,53 @@ impl TmdbMetadataClient {
                 .map(Some),
             _ => Ok(None),
         }
+    }
+
+    pub async fn poster_options(
+        &self,
+        candidates: &[MediaMetadataCandidate],
+    ) -> Result<Vec<MediaMetadataCandidate>> {
+        self.require_credential()?;
+        let mut options = Vec::new();
+        let mut targets = HashSet::new();
+        for candidate in candidates {
+            let Some(target) = parse_candidate_id(&candidate.id) else {
+                continue;
+            };
+            let target_key = format!("{}:{}", target.media_type, target.tmdb_id);
+            if !targets.insert(target_key) || targets.len() > 4 {
+                continue;
+            }
+            let endpoint = format!("/{}/{}/images", target.media_type, target.tmdb_id);
+            let query = vec![("include_image_language", "es,null,en".to_owned())];
+            let response = self.get_json::<ImageResponse>(&endpoint, &query).await;
+            let mut poster_paths = Vec::new();
+            if let Some(primary) = candidate.poster_url.as_deref() {
+                poster_paths.push(primary.to_owned());
+            }
+            if let Ok(response) = response {
+                for image in response.posters.into_iter().take(8) {
+                    let url = image_url("w500", Some(&image.file_path));
+                    if let Some(url) = url
+                        && !poster_paths
+                            .iter()
+                            .any(|existing| existing.rsplit('/').next() == url.rsplit('/').next())
+                    {
+                        poster_paths.push(url);
+                    }
+                    if poster_paths.len() >= 6 {
+                        break;
+                    }
+                }
+            }
+            for (index, poster_url) in poster_paths.into_iter().enumerate() {
+                let mut option = candidate.clone();
+                option.id = format!("{}:poster:{index}", candidate.id);
+                option.poster_url = Some(poster_url);
+                options.push(option);
+            }
+        }
+        Ok(options)
     }
 
     pub async fn cache_artwork(
@@ -378,6 +404,51 @@ impl TmdbMetadataClient {
     }
 }
 
+fn score_search_results(
+    requested_title: &str,
+    requested_year: Option<i32>,
+    media_type: &str,
+    season_number: Option<i32>,
+    episode_number: Option<i32>,
+    results: Vec<SearchResult>,
+) -> Vec<(i32, MediaMetadataCandidate)> {
+    results
+        .into_iter()
+        .filter_map(|result| {
+            let candidate_title = result.display_title()?.to_owned();
+            let candidate_year = result.year();
+            let score = score_result(
+                requested_title,
+                requested_year,
+                &candidate_title,
+                candidate_year,
+            );
+            // TMDB text search already checks translated and alternative titles. A localized
+            // alias can therefore legitimately look nothing like the displayed canonical title
+            // (for example "La Hermandad" -> "Daybreakers"). Keep low-scoring API matches for
+            // explicit review, while the confidence threshold above still prevents auto-import.
+            Some((
+                score,
+                MediaMetadataCandidate {
+                    id: candidate_context_id(media_type, result.id, season_number, episode_number),
+                    language: PRIMARY_LANGUAGE.to_owned(),
+                    page_id: result.id,
+                    title: candidate_title,
+                    year: candidate_year,
+                    description: non_empty(result.overview),
+                    source_url: tmdb_source_url(
+                        media_type,
+                        result.id,
+                        season_number,
+                        episode_number,
+                    ),
+                    poster_url: image_url("w342", result.poster_path.as_deref()),
+                },
+            ))
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 struct CandidateTarget {
     media_type: String,
@@ -536,6 +607,17 @@ struct SearchResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct ImageResponse {
+    #[serde(default)]
+    posters: Vec<TmdbImage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TmdbImage {
+    file_path: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct SearchResult {
     id: i64,
     title: Option<String>,
@@ -615,6 +697,33 @@ mod tests {
         assert!(
             score_result("The Thing", Some(1982), "The Thing", Some(1982))
                 > score_result("The Thing", Some(1982), "The Thing", Some(2011))
+        );
+    }
+
+    #[test]
+    fn keeps_a_completely_different_alternative_title_for_manual_review() {
+        let candidates = score_search_results(
+            "La Hermandad",
+            Some(2010),
+            "movie",
+            None,
+            None,
+            vec![SearchResult {
+                id: 19_901,
+                title: Some("Daybreakers".into()),
+                name: None,
+                release_date: Some("2010-01-06".into()),
+                first_air_date: None,
+                overview: Some("Un mundo dominado por vampiros.".into()),
+                poster_path: Some("/daybreakers.jpg".into()),
+            }],
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].1.title, "Daybreakers");
+        assert!(
+            candidates[0].0 < 76,
+            "an alternative title must require review"
         );
     }
 

@@ -3,8 +3,8 @@ use chrono::{Datelike, Local, Utc};
 use cinewana_core::{
     AccountDto, CatalogQuery, ClassificationUpdate, HomeDto, IdentificationReview,
     ImportedMediaMetadata, LibraryRootDto, MediaDetail, MediaKind, MediaMetadataCandidate,
-    MediaMetadataUpdate, MediaSummary, MediaTechnical, MediaTrack, ParsedMediaName, RootStatus,
-    SeriesSeasonSummary, SeriesSummary,
+    MediaMetadataUpdate, MediaSummary, MediaTechnical, MediaTrack, ParsedMediaName,
+    PortableMediaMetadata, RootStatus, SeriesSeasonSummary, SeriesSummary,
 };
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -64,6 +64,14 @@ pub struct MediaScanTarget {
     pub file_size: i64,
     pub modified_at: i64,
     pub fingerprint: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PortableMediaExport {
+    pub metadata: PortableMediaMetadata,
+    pub video_path: String,
+    pub poster_path: Option<String>,
+    pub backdrop_path: Option<String>,
 }
 
 impl Database {
@@ -247,6 +255,11 @@ impl Database {
         self.ensure_media_column("needs_review", "INTEGER NOT NULL DEFAULT 0", 11)?;
         self.ensure_media_column("review_reason", "TEXT", 12)?;
         self.ensure_media_column("manual_classification", "INTEGER NOT NULL DEFAULT 0", 13)?;
+        self.ensure_media_column("portable_id", "TEXT", 14)?;
+        self.connection.lock().execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_media_portable_id ON media_items(portable_id) WHERE portable_id IS NOT NULL",
+            [],
+        )?;
         Ok(())
     }
 
@@ -389,28 +402,65 @@ impl Database {
 
     pub fn replace_root(&self, path: &str) -> Result<String> {
         let now = Utc::now().to_rfc3339();
-        let id = Uuid::new_v4().to_string();
         let display = Path::new(path)
             .file_name()
             .and_then(|s| s.to_str())
             .filter(|s| !s.is_empty())
             .unwrap_or(path);
-        let conn = self.connection.lock();
-        conn.execute("UPDATE library_roots SET enabled=0,updated_at=?1", [&now])?;
-        conn.execute(
-            "INSERT INTO library_roots(id,path,display_name,enabled,recursive,watch_enabled,status,created_at,updated_at) VALUES(?1,?2,?3,1,1,1,'disconnected',?4,?4) ON CONFLICT(path) DO UPDATE SET enabled=1,display_name=excluded.display_name,updated_at=excluded.updated_at",
-            params![id, path, display, now],
-        )?;
-        conn.query_row("SELECT id FROM library_roots WHERE path=?1", [path], |r| {
-            r.get(0)
-        })
-        .map_err(Into::into)
+        let mut conn = self.connection.lock();
+        let transaction = conn.transaction()?;
+        let current_id = transaction
+            .query_row(
+                "SELECT id FROM library_roots WHERE enabled=1 ORDER BY created_at LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let existing_id = transaction
+            .query_row(
+                "SELECT id FROM library_roots WHERE path=?1",
+                [path],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+
+        let id = if let Some(existing_id) = existing_id {
+            transaction.execute(
+                "UPDATE library_roots SET enabled=0,updated_at=?1 WHERE id<>?2",
+                params![now, existing_id],
+            )?;
+            transaction.execute(
+                "UPDATE library_roots SET enabled=1,display_name=?1,status='disconnected',updated_at=?2 WHERE id=?3",
+                params![display, now, existing_id],
+            )?;
+            existing_id
+        } else if let Some(current_id) = current_id {
+            transaction.execute(
+                "UPDATE library_roots SET enabled=0,updated_at=?1 WHERE id<>?2",
+                params![now, current_id],
+            )?;
+            transaction.execute(
+                "UPDATE library_roots SET path=?1,display_name=?2,enabled=1,status='disconnected',updated_at=?3 WHERE id=?4",
+                params![path, display, now, current_id],
+            )?;
+            current_id
+        } else {
+            let id = Uuid::new_v4().to_string();
+            transaction.execute("UPDATE library_roots SET enabled=0,updated_at=?1", [&now])?;
+            transaction.execute(
+                "INSERT INTO library_roots(id,path,display_name,enabled,recursive,watch_enabled,status,created_at,updated_at) VALUES(?1,?2,?3,1,1,1,'disconnected',?4,?4)",
+                params![id, path, display, now],
+            )?;
+            id
+        };
+        transaction.commit()?;
+        Ok(id)
     }
 
     pub fn roots(&self, include_local_path: bool) -> Result<Vec<LibraryRootDto>> {
         let conn = self.connection.lock();
         let mut statement = conn.prepare(
-            "SELECT r.id,r.path,r.display_name,r.enabled,r.recursive,r.watch_enabled,r.status,r.last_scan_at,COALESCE(SUM(CASE WHEN f.offline=1 THEN 1 ELSE 0 END),0) FROM library_roots r LEFT JOIN media_files f ON f.library_root_id=r.id GROUP BY r.id ORDER BY r.created_at",
+            "SELECT r.id,r.path,r.display_name,r.enabled,r.recursive,r.watch_enabled,r.status,r.last_scan_at,COALESCE(SUM(CASE WHEN f.offline=1 THEN 1 ELSE 0 END),0) FROM library_roots r LEFT JOIN media_files f ON f.library_root_id=r.id WHERE r.enabled=1 GROUP BY r.id ORDER BY r.created_at",
         )?;
         let rows = statement.query_map([], |r| {
             let status: String = r.get(6)?;
@@ -695,12 +745,14 @@ impl Database {
         errors: u64,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        let conn = self.connection.lock();
+        let mut conn = self.connection.lock();
+        let transaction = conn.transaction()?;
         if status == "completed" {
-            conn.execute("UPDATE media_files SET offline=1,updated_at=?1 WHERE library_root_id=?2 AND COALESCE(last_seen_scan,'')<>?3", params![now,root_id,scan_id])?;
+            transaction.execute("UPDATE media_files SET offline=1,updated_at=?1 WHERE library_root_id=?2 AND COALESCE(last_seen_scan,'')<>?3", params![now,root_id,scan_id])?;
+            consolidate_disabled_root_duplicates_locked(&transaction, root_id)?;
         }
-        conn.execute("UPDATE scan_jobs SET status=?1,found=?2,processed=?3,skipped=?4,errors=?5,finished_at=?6 WHERE id=?7", params![status,found,processed,skipped,errors,now,scan_id])?;
-        conn.execute(
+        transaction.execute("UPDATE scan_jobs SET status=?1,found=?2,processed=?3,skipped=?4,errors=?5,finished_at=?6 WHERE id=?7", params![status,found,processed,skipped,errors,now,scan_id])?;
+        transaction.execute(
             "UPDATE library_roots SET status=?1,last_scan_at=?2,updated_at=?2 WHERE id=?3",
             params![
                 if status == "completed" {
@@ -712,6 +764,7 @@ impl Database {
                 root_id
             ],
         )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -787,7 +840,9 @@ impl Database {
                     m.review_reason,m.needs_review,m.metadata_status,m.metadata_candidates_json
              FROM media_items m
              JOIN media_files f ON f.media_item_id=m.id
-             WHERE (m.needs_review=1 OR m.metadata_status IN ('ambiguous','not_found','artwork_missing')) AND f.offline=0
+             JOIN library_roots r ON r.id=f.library_root_id
+             WHERE (m.needs_review=1 OR m.metadata_status IN ('ambiguous','not_found','artwork_missing'))
+               AND f.offline=0 AND r.enabled=1
              ORDER BY lower(f.file_name)",
         )?;
         statement
@@ -936,6 +991,160 @@ impl Database {
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    pub fn portable_media_export(&self, media_id: &str) -> Result<Option<PortableMediaExport>> {
+        let conn = self.connection.lock();
+        let entry = conn
+            .query_row(
+                "SELECT COALESCE(m.portable_id,m.id),f.path,f.file_name,f.file_size,f.fingerprint,
+                        m.kind,m.title,m.year,m.overview,m.genres_json,m.cast_json,m.series_title,
+                        m.season_number,m.episode_number,m.identification_source,m.needs_review,
+                        m.review_reason,m.manual_classification,m.manual_metadata,m.metadata_status,
+                        m.metadata_source_url,m.metadata_imported_at,m.metadata_candidates_json,
+                        m.poster_cache_key,m.backdrop_cache_key,m.updated_at
+                 FROM media_items m JOIN media_files f ON f.media_item_id=m.id
+                 WHERE m.id=?1 AND f.offline=0 LIMIT 1",
+                [media_id],
+                |row| {
+                    let kind: String = row.get(5)?;
+                    let candidates_json: String = row.get(22)?;
+                    Ok(PortableMediaExport {
+                        metadata: PortableMediaMetadata {
+                            schema_version: 1,
+                            portable_id: row.get(0)?,
+                            video_file_name: row.get(2)?,
+                            file_size: row.get(3)?,
+                            fingerprint: row.get(4)?,
+                            kind: if kind == "episode" {
+                                MediaKind::Episode
+                            } else {
+                                MediaKind::Movie
+                            },
+                            title: row.get(6)?,
+                            year: row.get(7)?,
+                            overview: row.get(8)?,
+                            genres: serde_json::from_str(&row.get::<_, String>(9)?)
+                                .unwrap_or_default(),
+                            cast: serde_json::from_str(&row.get::<_, String>(10)?)
+                                .unwrap_or_default(),
+                            series_title: row.get(11)?,
+                            season_number: row.get(12)?,
+                            episode_number: row.get(13)?,
+                            identification_source: row.get(14)?,
+                            needs_review: row.get::<_, i64>(15)? != 0,
+                            review_reason: row.get(16)?,
+                            manual_classification: row.get::<_, i64>(17)? != 0,
+                            manual_metadata: row.get::<_, i64>(18)? != 0,
+                            metadata_status: row.get(19)?,
+                            metadata_source_url: row.get(20)?,
+                            metadata_imported_at: row.get(21)?,
+                            metadata_candidates: serde_json::from_str(&candidates_json)
+                                .unwrap_or_default(),
+                            poster_file: None,
+                            backdrop_file: None,
+                            updated_at: row.get(25)?,
+                        },
+                        video_path: row.get(1)?,
+                        poster_path: row.get(23)?,
+                        backdrop_path: row.get(24)?,
+                    })
+                },
+            )
+            .optional()?;
+        if let Some(entry) = entry.as_ref() {
+            conn.execute(
+                "UPDATE media_items SET portable_id=COALESCE(portable_id,?1) WHERE id=?2",
+                params![entry.metadata.portable_id, media_id],
+            )?;
+        }
+        Ok(entry)
+    }
+
+    pub fn apply_portable_metadata(
+        &self,
+        media_id: &str,
+        metadata: &PortableMediaMetadata,
+        metadata_json_path: &str,
+        poster_path: Option<&str>,
+        backdrop_path: Option<&str>,
+    ) -> Result<()> {
+        let mut conn = self.connection.lock();
+        let transaction = conn.transaction()?;
+        let existing_id = transaction
+            .query_row(
+                "SELECT id FROM media_items
+                 WHERE (portable_id=?1 OR id=?1) AND id<>?2 LIMIT 1",
+                params![metadata.portable_id, media_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(existing_id) = existing_id {
+            merge_media_items_locked(&transaction, &existing_id, media_id)?;
+        }
+        let genres = normalize_tags(metadata.genres.clone(), 12);
+        let cast = normalize_tags(metadata.cast.clone(), 32);
+        transaction.execute(
+            "UPDATE media_items SET
+             portable_id=?1,kind=?2,title=?3,sort_title=LOWER(?3),year=?4,overview=?5,
+             genres_json=?6,cast_json=?7,series_title=?8,season_number=?9,episode_number=?10,
+             identification_source=?11,needs_review=?12,review_reason=?13,
+             manual_classification=?14,manual_metadata=?15,metadata_status=?16,
+             metadata_source_url=?17,metadata_imported_at=?18,
+             metadata_candidates_json=?19,metadata_json_path=?20,
+             poster_cache_key=COALESCE(?21,poster_cache_key),
+             backdrop_cache_key=COALESCE(?22,backdrop_cache_key),updated_at=?23
+             WHERE id=?24",
+            params![
+                metadata.portable_id,
+                kind_text(&metadata.kind),
+                metadata.title,
+                metadata.year,
+                metadata.overview,
+                serde_json::to_string(&genres)?,
+                serde_json::to_string(&cast)?,
+                metadata.series_title,
+                metadata.season_number,
+                metadata.episode_number,
+                metadata.identification_source,
+                metadata.needs_review,
+                metadata.review_reason,
+                metadata.manual_classification,
+                metadata.manual_metadata,
+                metadata.metadata_status,
+                metadata.metadata_source_url,
+                metadata.metadata_imported_at,
+                serde_json::to_string(&metadata.metadata_candidates)?,
+                metadata_json_path,
+                poster_path,
+                backdrop_path,
+                metadata.updated_at,
+                media_id
+            ],
+        )?;
+        transaction.execute("DELETE FROM episodes WHERE media_item_id=?1", [media_id])?;
+        if metadata.kind == MediaKind::Episode {
+            let parsed = ParsedMediaName {
+                kind: MediaKind::Episode,
+                title: metadata.title.clone(),
+                year: metadata.year,
+                series_title: metadata.series_title.clone(),
+                season_number: metadata.season_number,
+                episode_number: metadata.episode_number,
+                identification_source: metadata.identification_source.clone(),
+                needs_review: metadata.needs_review,
+                review_reason: metadata.review_reason.clone(),
+            };
+            self.ensure_episode_hierarchy_locked(
+                &transaction,
+                media_id,
+                &parsed,
+                &metadata.updated_at,
+            )?;
+        }
+        cleanup_empty_series_locked(&transaction)?;
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn home(&self, account_id: Option<&str>) -> Result<HomeDto> {
@@ -1349,21 +1558,24 @@ impl Database {
         metadata_json_path: Option<&str>,
         poster_path: Option<&str>,
         backdrop_path: Option<&str>,
+        preserve_title: bool,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let genres = normalize_tags(metadata.genres.clone(), 12);
         let cast = normalize_tags(metadata.cast.clone(), 32);
         self.connection.lock().execute(
             "UPDATE media_items SET
-             title=CASE WHEN manual_metadata=0 AND COALESCE(?1,'')<>'' THEN ?1 ELSE title END,
-             sort_title=CASE WHEN manual_metadata=0 AND COALESCE(?1,'')<>'' THEN LOWER(?1) ELSE sort_title END,
+             title=CASE WHEN ?11=0 AND manual_metadata=0 AND manual_classification=0 AND COALESCE(?1,'')<>'' THEN ?1 ELSE title END,
+             sort_title=CASE WHEN ?11=0 AND manual_metadata=0 AND manual_classification=0 AND COALESCE(?1,'')<>'' THEN LOWER(?1) ELSE sort_title END,
              year=CASE WHEN manual_metadata=0 THEN COALESCE(?2,year) ELSE year END,
              overview=CASE WHEN manual_metadata=0 THEN COALESCE(?3,overview) ELSE overview END,
              genres_json=CASE WHEN manual_metadata=0 AND ?4<>'[]' THEN ?4 ELSE genres_json END,
              cast_json=CASE WHEN manual_metadata=0 AND ?5<>'[]' THEN ?5 ELSE cast_json END,
              poster_cache_key=COALESCE(?6,poster_cache_key),backdrop_cache_key=COALESCE(?7,backdrop_cache_key),
              metadata_status='imported',metadata_source_url=?8,metadata_imported_at=?9,metadata_checked_at=?9,
-             metadata_candidates_json='[]',metadata_json_path=?10,updated_at=?9 WHERE id=?11",
+             metadata_candidates_json='[]',metadata_json_path=?10,
+             manual_classification=CASE WHEN ?11=1 THEN 1 ELSE manual_classification END,
+             updated_at=?9 WHERE id=?12",
             params![
                 metadata.title,
                 metadata.year,
@@ -1375,6 +1587,7 @@ impl Database {
                 metadata.source_url,
                 now,
                 metadata_json_path,
+                preserve_title,
                 media_id
             ],
         )?;
@@ -1535,9 +1748,10 @@ SELECT m.id,m.kind,m.title,m.year,m.series_title,m.season_number,m.episode_numbe
        COALESCE(u.favorite,0),COALESCE(u.in_watchlist,0),f.offline,m.created_at,m.poster_cache_key,m.backdrop_cache_key,m.preview_cache_key,
        COALESCE(m.runtime_ms,f.duration_ms),f.width,f.height,f.container,f.video_codec,f.audio_codec,f.hdr_type
 FROM media_items m JOIN media_files f ON f.media_item_id=m.id
+JOIN library_roots r ON r.id=f.library_root_id
 LEFT JOIN account_watch_progress p ON p.media_item_id=m.id AND p.account_id=?1
 LEFT JOIN account_user_flags u ON u.media_item_id=m.id AND u.account_id=?1
-WHERE f.offline=0 ORDER BY m.created_at DESC
+WHERE f.offline=0 AND r.enabled=1 ORDER BY m.created_at DESC
 "#;
 
 const MEDIA_SELECT_BY_ID: &str = r#"
@@ -1546,9 +1760,10 @@ SELECT m.id,m.kind,m.title,m.year,m.series_title,m.season_number,m.episode_numbe
        COALESCE(u.favorite,0),COALESCE(u.in_watchlist,0),f.offline,m.created_at,m.poster_cache_key,m.backdrop_cache_key,m.preview_cache_key,
        COALESCE(m.runtime_ms,f.duration_ms),f.width,f.height,f.container,f.video_codec,f.audio_codec,f.hdr_type
 FROM media_items m JOIN media_files f ON f.media_item_id=m.id
+JOIN library_roots r ON r.id=f.library_root_id
 LEFT JOIN account_watch_progress p ON p.media_item_id=m.id AND p.account_id=?1
 LEFT JOIN account_user_flags u ON u.media_item_id=m.id AND u.account_id=?1
-WHERE f.offline=0 AND m.id=?2
+WHERE f.offline=0 AND r.enabled=1 AND m.id=?2
 "#;
 
 fn recommendations_locked(
@@ -1949,6 +2164,327 @@ fn cleanup_empty_series_locked(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn consolidate_disabled_root_duplicates_locked(
+    conn: &Connection,
+    active_root_id: &str,
+) -> Result<()> {
+    let pairs = {
+        let mut statement = conn.prepare(
+            "SELECT DISTINCT old_file.media_item_id,active_file.media_item_id
+             FROM media_files active_file
+             JOIN media_files old_file ON old_file.fingerprint=active_file.fingerprint
+             JOIN library_roots old_root ON old_root.id=old_file.library_root_id
+             WHERE active_file.library_root_id=?1 AND active_file.offline=0
+               AND old_root.enabled=0 AND old_file.media_item_id<>active_file.media_item_id",
+        )?;
+        statement
+            .query_map([active_root_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (source_id, target_id) in pairs {
+        merge_media_items_locked(conn, &source_id, &target_id)?;
+    }
+    cleanup_empty_series_locked(conn)
+}
+
+fn merge_media_items_locked(conn: &Connection, source_id: &str, target_id: &str) -> Result<()> {
+    let source = conn
+        .query_row(
+            "SELECT manual_metadata,manual_classification,metadata_status FROM media_items WHERE id=?1",
+            [source_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)? != 0,
+                    row.get::<_, i64>(1)? != 0,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((source_manual_metadata, source_manual_classification, source_metadata_status)) =
+        source
+    else {
+        return Ok(());
+    };
+    let (target_manual_metadata, target_manual_classification, target_metadata_status) = conn
+        .query_row(
+            "SELECT manual_metadata,manual_classification,metadata_status FROM media_items WHERE id=?1",
+            [target_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)? != 0,
+                    row.get::<_, i64>(1)? != 0,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+
+    if source_metadata_status == "imported" && target_metadata_status != "imported" {
+        conn.execute(
+            "UPDATE media_items SET
+             title=CASE WHEN manual_metadata=0 THEN (SELECT title FROM media_items WHERE id=?1) ELSE title END,
+             sort_title=CASE WHEN manual_metadata=0 THEN (SELECT sort_title FROM media_items WHERE id=?1) ELSE sort_title END,
+             year=CASE WHEN manual_metadata=0 THEN (SELECT year FROM media_items WHERE id=?1) ELSE year END,
+             overview=CASE WHEN manual_metadata=0 THEN (SELECT overview FROM media_items WHERE id=?1) ELSE overview END,
+             genres_json=CASE WHEN manual_metadata=0 THEN (SELECT genres_json FROM media_items WHERE id=?1) ELSE genres_json END,
+             cast_json=CASE WHEN manual_metadata=0 THEN (SELECT cast_json FROM media_items WHERE id=?1) ELSE cast_json END,
+             metadata_status=(SELECT metadata_status FROM media_items WHERE id=?1),
+             metadata_source_url=(SELECT metadata_source_url FROM media_items WHERE id=?1),
+             metadata_imported_at=(SELECT metadata_imported_at FROM media_items WHERE id=?1),
+             metadata_checked_at=(SELECT metadata_checked_at FROM media_items WHERE id=?1),
+             metadata_candidates_json=(SELECT metadata_candidates_json FROM media_items WHERE id=?1),
+             metadata_json_path=(SELECT metadata_json_path FROM media_items WHERE id=?1)
+             WHERE id=?2",
+            params![source_id, target_id],
+        )?;
+    }
+    if source_manual_metadata && !target_manual_metadata {
+        conn.execute(
+            "UPDATE media_items SET
+             title=(SELECT title FROM media_items WHERE id=?1),
+             original_title=(SELECT original_title FROM media_items WHERE id=?1),
+             sort_title=(SELECT sort_title FROM media_items WHERE id=?1),
+             year=(SELECT year FROM media_items WHERE id=?1),
+             overview=(SELECT overview FROM media_items WHERE id=?1),
+             genres_json=(SELECT genres_json FROM media_items WHERE id=?1),
+             cast_json=(SELECT cast_json FROM media_items WHERE id=?1),
+             runtime_ms=(SELECT runtime_ms FROM media_items WHERE id=?1),manual_metadata=1
+             WHERE id=?2",
+            params![source_id, target_id],
+        )?;
+    }
+    let source_classification_wins = source_manual_classification && !target_manual_classification;
+    if source_classification_wins {
+        conn.execute(
+            "UPDATE media_items SET
+             kind=(SELECT kind FROM media_items WHERE id=?1),
+             title=CASE WHEN manual_metadata=0 THEN (SELECT title FROM media_items WHERE id=?1) ELSE title END,
+             sort_title=CASE WHEN manual_metadata=0 THEN (SELECT sort_title FROM media_items WHERE id=?1) ELSE sort_title END,
+             series_title=(SELECT series_title FROM media_items WHERE id=?1),
+             season_number=(SELECT season_number FROM media_items WHERE id=?1),
+             episode_number=(SELECT episode_number FROM media_items WHERE id=?1),
+             identification_source=(SELECT identification_source FROM media_items WHERE id=?1),
+             needs_review=(SELECT needs_review FROM media_items WHERE id=?1),
+             review_reason=(SELECT review_reason FROM media_items WHERE id=?1),manual_classification=1
+             WHERE id=?2",
+            params![source_id, target_id],
+        )?;
+        conn.execute("DELETE FROM episodes WHERE media_item_id=?1", [target_id])?;
+        conn.execute(
+            "UPDATE episodes SET media_item_id=?1 WHERE media_item_id=?2",
+            params![target_id, source_id],
+        )?;
+    }
+    conn.execute(
+        "UPDATE media_items SET
+         poster_cache_key=COALESCE(poster_cache_key,(SELECT poster_cache_key FROM media_items WHERE id=?1)),
+         backdrop_cache_key=COALESCE(backdrop_cache_key,(SELECT backdrop_cache_key FROM media_items WHERE id=?1)),
+         preview_cache_key=COALESCE(preview_cache_key,(SELECT preview_cache_key FROM media_items WHERE id=?1)),
+         created_at=MIN(created_at,(SELECT created_at FROM media_items WHERE id=?1)),updated_at=?2
+         WHERE id=?3",
+        params![source_id, Utc::now().to_rfc3339(), target_id],
+    )?;
+
+    merge_account_progress_locked(conn, source_id, target_id)?;
+    merge_account_flags_locked(conn, source_id, target_id)?;
+    merge_legacy_progress_locked(conn, source_id, target_id)?;
+    merge_legacy_flags_locked(conn, source_id, target_id)?;
+    conn.execute(
+        "UPDATE account_watch_history SET media_item_id=?1 WHERE media_item_id=?2",
+        params![target_id, source_id],
+    )?;
+    conn.execute(
+        "UPDATE watch_history SET media_item_id=?1 WHERE media_item_id=?2",
+        params![target_id, source_id],
+    )?;
+    conn.execute(
+        "UPDATE hero_slots SET media_item_id=?1 WHERE media_item_id=?2",
+        params![target_id, source_id],
+    )?;
+    conn.execute(
+        "UPDATE image_profiles SET media_item_id=?1 WHERE media_item_id=?2",
+        params![target_id, source_id],
+    )?;
+    conn.execute("DELETE FROM media_items WHERE id=?1", [source_id])?;
+    Ok(())
+}
+
+fn merge_account_progress_locked(
+    conn: &Connection,
+    source_id: &str,
+    target_id: &str,
+) -> Result<()> {
+    let rows = {
+        let mut statement = conn.prepare(
+            "SELECT account_id,position_ms,duration_ms,completed,last_watched_at
+             FROM account_watch_progress WHERE media_item_id=?1",
+        )?;
+        statement
+            .query_map([source_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (account_id, position, duration, completed, watched_at) in rows {
+        let current = conn
+            .query_row(
+                "SELECT position_ms,duration_ms,completed,last_watched_at FROM account_watch_progress WHERE account_id=?1 AND media_item_id=?2",
+                params![account_id, target_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, Option<String>>(3)?)),
+            )
+            .optional()?;
+        let (position, duration, completed, watched_at) = match current {
+            Some((current_position, current_duration, current_completed, current_watched_at)) => {
+                let source_is_newer = watched_at.as_deref().unwrap_or("")
+                    > current_watched_at.as_deref().unwrap_or("");
+                (
+                    if source_is_newer {
+                        position
+                    } else {
+                        current_position
+                    },
+                    duration.max(current_duration),
+                    completed.max(current_completed),
+                    if source_is_newer {
+                        watched_at
+                    } else {
+                        current_watched_at
+                    },
+                )
+            }
+            None => (position, duration, completed, watched_at),
+        };
+        conn.execute(
+            "INSERT INTO account_watch_progress(account_id,media_item_id,position_ms,duration_ms,completed,last_watched_at)
+             VALUES(?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(account_id,media_item_id) DO UPDATE SET position_ms=excluded.position_ms,duration_ms=excluded.duration_ms,completed=excluded.completed,last_watched_at=excluded.last_watched_at",
+            params![account_id, target_id, position, duration, completed, watched_at],
+        )?;
+    }
+    conn.execute(
+        "DELETE FROM account_watch_progress WHERE media_item_id=?1",
+        [source_id],
+    )?;
+    Ok(())
+}
+
+fn merge_account_flags_locked(conn: &Connection, source_id: &str, target_id: &str) -> Result<()> {
+    let rows = {
+        let mut statement = conn.prepare(
+            "SELECT account_id,favorite,in_watchlist,updated_at FROM account_user_flags WHERE media_item_id=?1",
+        )?;
+        statement
+            .query_map([source_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (account_id, favorite, watchlist, updated_at) in rows {
+        conn.execute(
+            "INSERT INTO account_user_flags(account_id,media_item_id,favorite,in_watchlist,updated_at)
+             VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(account_id,media_item_id) DO UPDATE SET
+             favorite=MAX(account_user_flags.favorite,excluded.favorite),
+             in_watchlist=MAX(account_user_flags.in_watchlist,excluded.in_watchlist),
+             updated_at=MAX(account_user_flags.updated_at,excluded.updated_at)",
+            params![account_id, target_id, favorite, watchlist, updated_at],
+        )?;
+    }
+    conn.execute(
+        "DELETE FROM account_user_flags WHERE media_item_id=?1",
+        [source_id],
+    )?;
+    Ok(())
+}
+
+fn merge_legacy_progress_locked(conn: &Connection, source_id: &str, target_id: &str) -> Result<()> {
+    let source = conn
+        .query_row(
+            "SELECT position_ms,duration_ms,completed,last_watched_at FROM watch_progress WHERE media_item_id=?1",
+            [source_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, Option<String>>(3)?)),
+        )
+        .optional()?;
+    if let Some((position, duration, completed, watched_at)) = source {
+        let current = conn
+            .query_row(
+                "SELECT position_ms,duration_ms,completed,last_watched_at FROM watch_progress WHERE media_item_id=?1",
+                [target_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, Option<String>>(3)?)),
+            )
+            .optional()?;
+        let (position, duration, completed, watched_at) = match current {
+            Some((current_position, current_duration, current_completed, current_watched_at)) => {
+                let source_is_newer = watched_at.as_deref().unwrap_or("")
+                    > current_watched_at.as_deref().unwrap_or("");
+                (
+                    if source_is_newer {
+                        position
+                    } else {
+                        current_position
+                    },
+                    duration.max(current_duration),
+                    completed.max(current_completed),
+                    if source_is_newer {
+                        watched_at
+                    } else {
+                        current_watched_at
+                    },
+                )
+            }
+            None => (position, duration, completed, watched_at),
+        };
+        conn.execute(
+            "INSERT INTO watch_progress(media_item_id,position_ms,duration_ms,completed,last_watched_at) VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(media_item_id) DO UPDATE SET position_ms=excluded.position_ms,duration_ms=excluded.duration_ms,completed=excluded.completed,last_watched_at=excluded.last_watched_at",
+            params![target_id, position, duration, completed, watched_at],
+        )?;
+    }
+    conn.execute(
+        "DELETE FROM watch_progress WHERE media_item_id=?1",
+        [source_id],
+    )?;
+    Ok(())
+}
+
+fn merge_legacy_flags_locked(conn: &Connection, source_id: &str, target_id: &str) -> Result<()> {
+    let source = conn
+        .query_row(
+            "SELECT favorite,in_watchlist,updated_at FROM user_flags WHERE media_item_id=?1",
+            [source_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((favorite, watchlist, updated_at)) = source {
+        conn.execute(
+            "INSERT INTO user_flags(media_item_id,favorite,in_watchlist,updated_at) VALUES(?1,?2,?3,?4)
+             ON CONFLICT(media_item_id) DO UPDATE SET favorite=MAX(user_flags.favorite,excluded.favorite),in_watchlist=MAX(user_flags.in_watchlist,excluded.in_watchlist),updated_at=MAX(user_flags.updated_at,excluded.updated_at)",
+            params![target_id, favorite, watchlist, updated_at],
+        )?;
+    }
+    conn.execute("DELETE FROM user_flags WHERE media_item_id=?1", [source_id])?;
+    Ok(())
+}
+
 fn update_media_and_file(
     conn: &Connection,
     media_id: &str,
@@ -1971,7 +2507,7 @@ fn rebase_cache_file(
 ) -> Option<String> {
     let current = current?;
     let normalized = current.replace('\\', "/").to_lowercase();
-    let marker = relative_directory.join("/").to_lowercase();
+    let marker = format!("/{}/", relative_directory.join("/").to_lowercase());
     if !normalized.contains(&marker) {
         return Some(current);
     }
@@ -2029,6 +2565,70 @@ mod tests {
             technical: MediaTechnical::default(),
             external_subtitles: vec![],
         }
+    }
+
+    #[test]
+    fn portable_metadata_rebuilds_a_fresh_local_cache() {
+        let source = Database::open(":memory:").unwrap();
+        let source_root = source.seed_root(r"D:\media").unwrap();
+        let source_item = source
+            .upsert_file(
+                &source_root,
+                "scan-1",
+                &discovered_file(r"D:\media\Alien\Alien.mp4", "alien-content"),
+            )
+            .unwrap();
+        source
+            .update_media_metadata(
+                &source_item.media_id,
+                &MediaMetadataUpdate {
+                    title: "Alien: El octavo pasajero".into(),
+                    year: Some(1979),
+                    overview: Some("La tripulación del Nostromo recibe una señal.".into()),
+                    genres: vec!["Ciencia ficción".into(), "Terror".into()],
+                    cast: vec!["Sigourney Weaver".into()],
+                    poster_path: None,
+                    backdrop_path: None,
+                },
+            )
+            .unwrap();
+        let portable = source
+            .portable_media_export(&source_item.media_id)
+            .unwrap()
+            .unwrap()
+            .metadata;
+
+        let destination = Database::open(":memory:").unwrap();
+        let destination_root = destination.seed_root(r"E:\cine").unwrap();
+        let destination_item = destination
+            .upsert_file(
+                &destination_root,
+                "scan-1",
+                &discovered_file(r"E:\cine\Alien\Alien.mp4", "alien-content"),
+            )
+            .unwrap();
+        destination
+            .apply_portable_metadata(
+                &destination_item.media_id,
+                &portable,
+                r"E:\cine\Alien\.cinewana\items\alien\metadata.json",
+                Some(r"E:\cine\Alien\.cinewana\items\alien\poster.jpg"),
+                None,
+            )
+            .unwrap();
+        let account = destination.create_account("Jael", "abcd1").unwrap();
+        let rebuilt = destination
+            .catalog(Some(&account.id), &CatalogQuery::default())
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        assert_eq!(rebuilt.title, "Alien: El octavo pasajero");
+        assert_eq!(rebuilt.year, Some(1979));
+        assert_eq!(
+            rebuilt.artwork_url.as_deref(),
+            Some(r"E:\cine\Alien\.cinewana\items\alien\poster.jpg")
+        );
     }
 
     #[test]
@@ -2166,6 +2766,114 @@ mod tests {
                 )
                 .unwrap(),
             50
+        );
+    }
+
+    #[test]
+    fn replacing_a_library_path_reuses_the_root_and_media_identity() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        let original = db
+            .upsert_file(
+                &root,
+                "scan-1",
+                &discovered_file(r"D:\media\Movie.2020.mkv", "same-content"),
+            )
+            .unwrap();
+        db.finish_scan(&root, "scan-1", "completed", 1, 1, 0, 0)
+            .unwrap();
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        db.save_progress(&account.id, &original.media_id, 50, 100)
+            .unwrap();
+
+        let replaced_root = db.replace_root(r"E:\media").unwrap();
+        assert_eq!(replaced_root, root);
+        let roots = db.roots(true).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].local_path.as_deref(), Some(r"E:\media"));
+
+        db.start_scan(&root, "scan-2", "root_changed").unwrap();
+        let relocated = db
+            .upsert_file(
+                &root,
+                "scan-2",
+                &discovered_file(r"E:\media\Movie.2020.mkv", "same-content"),
+            )
+            .unwrap();
+        db.finish_scan(&root, "scan-2", "completed", 1, 1, 0, 0)
+            .unwrap();
+
+        assert_eq!(relocated.media_id, original.media_id);
+        let catalog = db
+            .catalog(Some(&account.id), &CatalogQuery::default())
+            .unwrap();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].id, original.media_id);
+        assert_eq!(catalog[0].progress_percent, 50.0);
+        assert_eq!(
+            db.media_path(&original.media_id).unwrap().as_deref(),
+            Some(r"E:\media\Movie.2020.mkv")
+        );
+    }
+
+    #[test]
+    fn completed_scan_consolidates_duplicates_from_a_disabled_root() {
+        let db = Database::open(":memory:").unwrap();
+        let old_root = db.seed_root(r"D:\media").unwrap();
+        db.start_scan(&old_root, "scan-1", "test").unwrap();
+        let old = db
+            .upsert_file(
+                &old_root,
+                "scan-1",
+                &discovered_file(r"D:\media\Movie.2020.mkv", "same-content"),
+            )
+            .unwrap();
+        db.finish_scan(&old_root, "scan-1", "completed", 1, 1, 0, 0)
+            .unwrap();
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        db.save_progress(&account.id, &old.media_id, 50, 100)
+            .unwrap();
+        db.set_flag(&account.id, &old.media_id, "favorite", true)
+            .unwrap();
+
+        let new_root = db.seed_root(r"E:\media").unwrap();
+        db.connection
+            .lock()
+            .execute(
+                "UPDATE library_roots SET enabled=CASE WHEN id=?1 THEN 1 ELSE 0 END",
+                [&new_root],
+            )
+            .unwrap();
+        db.start_scan(&new_root, "scan-2", "root_changed").unwrap();
+        let duplicate = db
+            .upsert_file(
+                &new_root,
+                "scan-2",
+                &discovered_file(r"E:\media\Movie.2020.mkv", "same-content"),
+            )
+            .unwrap();
+        assert_ne!(duplicate.media_id, old.media_id);
+        db.finish_scan(&new_root, "scan-2", "completed", 1, 1, 0, 0)
+            .unwrap();
+
+        let catalog = db
+            .catalog(Some(&account.id), &CatalogQuery::default())
+            .unwrap();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].id, duplicate.media_id);
+        assert_eq!(catalog[0].progress_percent, 50.0);
+        assert!(catalog[0].favorite);
+        assert_eq!(
+            db.connection
+                .lock()
+                .query_row(
+                    "SELECT COUNT(*) FROM media_files WHERE fingerprint='same-content'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
         );
     }
 
@@ -2392,6 +3100,57 @@ mod tests {
         assert_eq!(recommendation.id, unwatched_match_id);
         assert_eq!(recommendation.progress_percent, 0.0);
         assert!(!recommendation.completed);
+    }
+
+    #[test]
+    fn applying_an_alternative_tmdb_match_can_preserve_the_local_title() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        let item = db
+            .upsert_file(
+                &root,
+                "scan-1",
+                &discovered_file(r"D:\media\La.Hermandad.2010.mkv", "daybreakers"),
+            )
+            .unwrap();
+        let metadata = ImportedMediaMetadata {
+            provider: "tmdb".into(),
+            title: "Daybreakers".into(),
+            year: Some(2010),
+            overview: Some("Un mundo dominado por vampiros.".into()),
+            genres: vec!["Terror".into()],
+            cast: vec!["Ethan Hawke".into()],
+            source_url: "https://www.themoviedb.org/movie/19901".into(),
+            source_language: "es-AR".into(),
+            poster_url: Some("https://image.tmdb.org/daybreakers.jpg".into()),
+            backdrop_url: None,
+        };
+
+        db.apply_imported_metadata(
+            &item.media_id,
+            &metadata,
+            Some(r"D:\cache\daybreakers.json"),
+            Some(r"D:\cache\daybreakers.jpg"),
+            None,
+            true,
+        )
+        .unwrap();
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        let detail = db
+            .media_detail(Some(&account.id), &item.media_id)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(detail.summary.title, "La Hermandad");
+        assert_eq!(
+            detail.summary.overview.as_deref(),
+            Some("Un mundo dominado por vampiros.")
+        );
+        assert_eq!(
+            detail.summary.artwork_url.as_deref(),
+            Some(r"D:\cache\daybreakers.jpg")
+        );
+        assert_eq!(detail.metadata_status, "imported");
     }
 
     #[test]

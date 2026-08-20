@@ -129,6 +129,8 @@ export function installDevTauriMock() {
         return false;
       case 'analyze_media_image':
         return imageAnalysis;
+      case 'metadata_poster_options':
+        return [];
       case 'start_scan':
       case 'cancel_scan':
         return scan;

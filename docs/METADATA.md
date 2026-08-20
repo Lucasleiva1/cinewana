@@ -18,10 +18,12 @@ TMDB is consulted only while importing, manually refreshing a title, or refreshi
 - `%APPDATA%\com.cinewana.app\cache\tmdb\posters` stores downloaded posters.
 - `%APPDATA%\com.cinewana.app\cache\tmdb\backdrops` stores downloaded backdrops and episode stills.
 - `%APPDATA%\com.cinewana.app\cache\metadata` stores a JSON snapshot by media fingerprint.
+- `<carpeta de la película>\.cinewana\items\<id>\metadata.json` stores the permanent portable title record.
+- The same portable item directory stores the selected poster and backdrop, without modifying the video.
 
-These locations are independent of the installer directory, so an update or reinstall to a different folder under the same Windows user reuses the catalog and artwork without another TMDB request.
+These locations are independent of the installer directory. SQLite makes normal startup and browsing fast, while the `.cinewana` package travels with the movie folder and can reconstruct that cache without another TMDB request.
 
-For another Windows computer, close CINE WANA and copy the complete `%APPDATA%\com.cinewana.app` directory to the same application-data location on the destination computer. Cache paths are rebased automatically at startup. If the video library has a different physical location, select the new root and rescan; original media files remain read-only. Copying only the database without the cache is detected and reported in the review queue as missing artwork.
+For another Windows computer, copy each complete movie folder, including its hidden `.cinewana` directory, and select the copied library as the root. CINE WANA reads the portable records, rebuilds its local SQLite cache, and uses the included artwork. Only `.cinewana` is writable; original media files remain read-only.
 
 ## Credential handling
 

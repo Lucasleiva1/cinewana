@@ -14,6 +14,10 @@ export function shouldPinPlayerChrome(state: PlayerChromeState) {
   return state.errorVisible || state.imagePanelOpen || state.settingsPanelOpen;
 }
 
+export function shouldStartImageAnalysis(hasSessionAnalysis: boolean, analysisRunning: boolean) {
+  return !hasSessionAnalysis && !analysisRunning;
+}
+
 export function seekSecondsForPoint(clientX: number, left: number, width: number) {
   const direction = clientX < left + width / 2 ? -1 : 1;
   return direction * PLAYER_SEEK_SECONDS;

@@ -5,6 +5,7 @@ import {
   resolveVolumeWithDetent,
   seekSecondsForPoint,
   shouldPinPlayerChrome,
+  shouldStartImageAnalysis,
 } from './playerControls';
 
 describe('player chrome auto-hide', () => {
@@ -23,6 +24,14 @@ describe('player surface gestures', () => {
   it('seeks backward on the left and forward on the right', () => {
     expect(seekSecondsForPoint(120, 100, 800)).toBe(-10);
     expect(seekSecondsForPoint(899, 100, 800)).toBe(10);
+  });
+});
+
+describe('image analysis session cache', () => {
+  it('analyzes once and reuses the result while the same player session remains open', () => {
+    expect(shouldStartImageAnalysis(false, false)).toBe(true);
+    expect(shouldStartImageAnalysis(false, true)).toBe(false);
+    expect(shouldStartImageAnalysis(true, false)).toBe(false);
   });
 });
 

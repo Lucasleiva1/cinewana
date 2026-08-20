@@ -1,10 +1,11 @@
 mod media_stream;
+mod portable_library;
 mod remote;
 
 use cinewana_core::{
     AccountDto, BootstrapDto, CatalogQuery, ClassificationUpdate, DEFAULT_LIBRARY_ROOT,
-    ImageAnalysis, ImageAnalysisProgress, MediaDetail, MediaMetadataCandidate, MediaMetadataUpdate,
-    MediaSummary, PlayerCommand, PlayerState, ScanProgress,
+    ImageAnalysis, ImageAnalysisProgress, MediaDetail, MediaKind, MediaMetadataCandidate,
+    MediaMetadataUpdate, MediaSummary, PlayerCommand, PlayerState, ScanProgress,
 };
 use cinewana_database::{Database, MetadataImportTarget};
 use cinewana_metadata::{MetadataSearchOutcome, TmdbMetadataClient};
@@ -156,9 +157,21 @@ fn next_up(
 #[tauri::command]
 fn update_media_metadata(
     media_id: String,
-    metadata: MediaMetadataUpdate,
+    mut metadata: MediaMetadataUpdate,
     state: State<'_, AppServices>,
 ) -> Result<(), String> {
+    if let Some(source) = metadata.poster_path.as_deref() {
+        metadata.poster_path = Some(
+            cache_manual_artwork(&state.cache_dir, &media_id, source, "posters")
+                .map_err(error_string)?,
+        );
+    }
+    if let Some(source) = metadata.backdrop_path.as_deref() {
+        metadata.backdrop_path = Some(
+            cache_manual_artwork(&state.cache_dir, &media_id, source, "backdrops")
+                .map_err(error_string)?,
+        );
+    }
     state
         .db
         .update_media_metadata(&media_id, &metadata)
@@ -186,6 +199,7 @@ async fn refresh_media_metadata(
 async fn apply_metadata_candidate(
     media_id: String,
     candidate: MediaMetadataCandidate,
+    preserve_title: Option<bool>,
     state: State<'_, AppServices>,
 ) -> Result<(), String> {
     let target = state
@@ -193,16 +207,48 @@ async fn apply_metadata_candidate(
         .metadata_target(&media_id)
         .map_err(error_string)?
         .ok_or_else(|| "No se encontró el archivo para guardar información".to_string())?;
-    let metadata = state
+    let mut metadata = state
         .metadata
         .import_candidate(&candidate)
         .await
         .map_err(error_string)?
         .ok_or_else(|| "No se pudo leer esa coincidencia de TMDB".to_string())?;
-    persist_imported_metadata(state.inner(), &target, &metadata)
-        .await
-        .map_err(error_string)?;
+    if candidate.poster_url.is_some() {
+        metadata.poster_url = candidate.poster_url.clone();
+    }
+    persist_imported_metadata(
+        state.inner(),
+        &target,
+        &metadata,
+        preserve_title.unwrap_or(false),
+    )
+    .await
+    .map_err(error_string)?;
     write_identification_cache(state.inner(), &media_id).map_err(error_string)
+}
+
+#[tauri::command]
+async fn metadata_poster_options(
+    media_id: String,
+    state: State<'_, AppServices>,
+) -> Result<Vec<MediaMetadataCandidate>, String> {
+    let account_id = state.db.require_active_account_id().map_err(error_string)?;
+    let detail = state
+        .db
+        .media_detail(Some(&account_id), &media_id)
+        .map_err(error_string)?
+        .ok_or_else(|| "No se encontró la película para buscar portadas".to_string())?;
+    let mut candidates = detail.metadata_candidates.clone();
+    if candidates.is_empty()
+        && let Some(candidate) = tmdb_candidate_from_detail(&detail)
+    {
+        candidates.push(candidate);
+    }
+    state
+        .metadata
+        .poster_options(&candidates)
+        .await
+        .map_err(error_string)
 }
 
 #[tauri::command]
@@ -631,7 +677,7 @@ async fn import_metadata_for_target(
         .await?;
     match outcome {
         MetadataSearchOutcome::Imported(metadata) => {
-            persist_imported_metadata(services, target, &metadata).await?;
+            persist_imported_metadata(services, target, &metadata, false).await?;
         }
         MetadataSearchOutcome::Ambiguous(candidates) => {
             services
@@ -651,6 +697,7 @@ async fn persist_imported_metadata(
     services: &AppServices,
     target: &MetadataImportTarget,
     metadata: &cinewana_core::ImportedMediaMetadata,
+    preserve_title: bool,
 ) -> anyhow::Result<()> {
     let json_path =
         cinewana_metadata::write_metadata_json(&services.cache_dir, &target.fingerprint, metadata)?;
@@ -672,24 +719,25 @@ async fn persist_imported_metadata(
         Some(&json_path.to_string_lossy()),
         poster_path.as_deref(),
         backdrop_path.as_deref(),
+        preserve_title,
     )?;
     Ok(())
 }
 
 fn write_identification_cache(services: &AppServices, media_id: &str) -> anyhow::Result<()> {
-    let Some(entry) = services.db.identification_cache_entry(media_id)? else {
-        return Ok(());
-    };
-    let directory = services.cache_dir.join("identifications");
-    std::fs::create_dir_all(&directory)?;
-    let key = entry
-        .fingerprint
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .take(64)
-        .collect::<String>();
-    let path = directory.join(format!("{key}.json"));
-    std::fs::write(path, serde_json::to_vec_pretty(&entry.payload)?)?;
+    if let Some(entry) = services.db.identification_cache_entry(media_id)? {
+        let directory = services.cache_dir.join("identifications");
+        std::fs::create_dir_all(&directory)?;
+        let key = entry
+            .fingerprint
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .take(64)
+            .collect::<String>();
+        let path = directory.join(format!("{key}.json"));
+        std::fs::write(path, serde_json::to_vec_pretty(&entry.payload)?)?;
+    }
+    portable_library::sync_media(&services.db, media_id)?;
     Ok(())
 }
 
@@ -772,6 +820,18 @@ async fn run_scan(app: &AppHandle, services: &AppServices, reason: &str) -> anyh
                     &parsed,
                 )? {
                     local_skipped += 1;
+                    if portable_library::restore_media(
+                        &services.db,
+                        &services.cache_dir,
+                        &outcome.media_id,
+                        &path,
+                        state.file_size,
+                        None,
+                    )
+                    .is_err()
+                    {
+                        local_errors += 1;
+                    }
                     if services.metadata.configured()
                         && services
                             .db
@@ -800,6 +860,18 @@ async fn run_scan(app: &AppHandle, services: &AppServices, reason: &str) -> anyh
                             local_skipped += 1;
                         } else {
                             local_processed += 1;
+                        }
+                        if portable_library::restore_media(
+                            &services.db,
+                            &services.cache_dir,
+                            &outcome.media_id,
+                            &path,
+                            file.file_size,
+                            Some(&file.fingerprint),
+                        )
+                        .is_err()
+                        {
+                            local_errors += 1;
                         }
                         if let Some(ffmpeg) = services.ffmpeg.as_deref() {
                             {
@@ -965,6 +1037,71 @@ fn error_string(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
+fn tmdb_candidate_from_detail(detail: &MediaDetail) -> Option<MediaMetadataCandidate> {
+    let source_url = detail.metadata_source_url.as_deref()?;
+    let parts = source_url.split('/').collect::<Vec<_>>();
+    let marker = parts
+        .iter()
+        .position(|part| *part == "movie" || *part == "tv")?;
+    let media_type = *parts.get(marker)?;
+    let tmdb_id = parts.get(marker + 1)?.parse::<i64>().ok()?;
+    let id = match (
+        &detail.summary.kind,
+        detail.summary.season_number,
+        detail.summary.episode_number,
+    ) {
+        (MediaKind::Episode, Some(season), Some(episode)) => {
+            format!("tmdb:tv:{tmdb_id}:{season}:{episode}")
+        }
+        _ => format!("tmdb:{media_type}:{tmdb_id}"),
+    };
+    Some(MediaMetadataCandidate {
+        id,
+        language: "es-AR".into(),
+        page_id: tmdb_id,
+        title: detail.summary.title.clone(),
+        year: detail.summary.year,
+        description: detail.overview.clone(),
+        source_url: source_url.to_owned(),
+        poster_url: None,
+    })
+}
+
+fn cache_manual_artwork(
+    cache_dir: &std::path::Path,
+    media_id: &str,
+    source: &str,
+    kind: &str,
+) -> anyhow::Result<String> {
+    let source = std::path::Path::new(source);
+    if !source.is_file() {
+        anyhow::bail!("La imagen elegida ya no está disponible");
+    }
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .filter(|value| matches!(value.as_str(), "jpg" | "jpeg" | "png" | "webp"))
+        .ok_or_else(|| anyhow::anyhow!("La imagen debe ser JPG, PNG o WebP"))?;
+    let safe_id = media_id
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+        .take(80)
+        .collect::<String>();
+    let directory = cache_dir.join("manual").join(kind);
+    std::fs::create_dir_all(&directory)?;
+    let destination = directory.join(format!("{safe_id}.{extension}"));
+    if source != destination {
+        let temporary = directory.join(format!(".{safe_id}.{}.tmp", Uuid::new_v4()));
+        std::fs::copy(source, &temporary)?;
+        if destination.exists() {
+            std::fs::remove_file(&destination)?;
+        }
+        std::fs::rename(temporary, &destination)?;
+    }
+    Ok(destination.to_string_lossy().into_owned())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -975,7 +1112,9 @@ pub fn run() {
             let cache_dir = app_data.join("cache");
             let db = Arc::new(Database::open(app_data.join("cine-wana.db"))?);
             db.rebase_tmdb_cache(&cache_dir)?;
-            db.seed_root(DEFAULT_LIBRARY_ROOT)?;
+            if db.enabled_roots_with_paths()?.is_empty() {
+                db.seed_root(DEFAULT_LIBRARY_ROOT)?;
+            }
             let ffmpeg = find_command("ffmpeg");
             let remote =
                 RemoteService::new(db.clone(), app.handle().clone(), &app_data, &resource_dir);
@@ -996,6 +1135,11 @@ pub fn run() {
                 remote: remote.clone(),
             };
             app.manage(services.clone());
+            if let Some(main_window) = app.get_webview_window("main") {
+                main_window.show()?;
+                main_window.unminimize()?;
+                main_window.set_focus()?;
+            }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if remote_auto_start {
@@ -1019,6 +1163,7 @@ pub fn run() {
             update_media_metadata,
             refresh_media_metadata,
             apply_metadata_candidate,
+            metadata_poster_options,
             set_media_flag,
             save_progress,
             scan_status,

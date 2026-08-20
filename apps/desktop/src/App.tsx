@@ -42,6 +42,7 @@ export function App() {
   const [updateMessage,setUpdateMessage]=useState<string|null>(null);
   const [updating,setUpdating]=useState(false);
   const [metadataLoading,setMetadataLoading]=useState(false);
+  const [metadataNotice,setMetadataNotice]=useState<string|null>(null);
   const [remoteStatus,setRemoteStatus]=useState<RemoteStatus|null>(null);
   const [remoteBusy,setRemoteBusy]=useState(false);
   const [error,setError]=useState<string|null>(null);
@@ -78,11 +79,13 @@ export function App() {
   const rescan=async()=>{try{if(scan.running){setScan(await invoke('cancel_scan'));}else{setScan(await invoke('start_scan',{reason:'manual'}));}}catch(cause){setError(String(cause));}};
   const chooseFolder=async()=>{const selected=await open({directory:true,multiple:false,title:'Elegir carpeta de películas y series'});if(typeof selected==='string'){try{await invoke('replace_library_root',{path:selected});await refresh();}catch(cause){setError(String(cause));}}};
   const openDetail=async(id:string)=>{try{const data=await invoke<MediaDetail|null>('media_detail',{id});setDetail(data);}catch(cause){setError(String(cause));}};
-  const resolveIdentification=async(mediaId:string,classification:ClassificationUpdate)=>{try{setError(null);await invoke('resolve_identification',{mediaId,classification});await refresh();}catch(cause){setError(String(cause));}};
+  const resolveIdentification=async(mediaId:string,classification:ClassificationUpdate)=>{try{setError(null);await invoke('resolve_identification',{mediaId,classification});if(detail?.id===mediaId)setDetail(await invoke<MediaDetail|null>('media_detail',{id:mediaId}));await refresh();}catch(cause){setError(String(cause));throw cause;}};
   const setFlag=async(item:MediaSummary,flag:'favorite'|'watchlist')=>{const value=flag==='favorite'?!item.favorite:!item.inWatchlist;await invoke('set_media_flag',{mediaId:item.id,flag,value});await refresh();if(detail?.id===item.id)setDetail(await invoke('media_detail',{id:item.id}));};
-  const saveMetadata=async(mediaId:string,metadata:MediaMetadataUpdate)=>{try{setError(null);await invoke('update_media_metadata',{mediaId,metadata});const next=await invoke<MediaDetail|null>('media_detail',{id:mediaId});setDetail(next);await refresh();}catch(cause){setError(String(cause));}};
-  const refreshMetadata=async(mediaId:string)=>{try{setMetadataLoading(true);setError(null);await invoke('refresh_media_metadata',{mediaId});const next=await invoke<MediaDetail|null>('media_detail',{id:mediaId});setDetail(next);await refresh();}catch(cause){setError(String(cause));}finally{setMetadataLoading(false);}};
-  const applyMetadataCandidate=async(mediaId:string,candidate:MediaMetadataCandidate)=>{try{setMetadataLoading(true);setError(null);await invoke('apply_metadata_candidate',{mediaId,candidate});const next=await invoke<MediaDetail|null>('media_detail',{id:mediaId});setDetail(next);await refresh();}catch(cause){setError(String(cause));}finally{setMetadataLoading(false);}};
+  const saveMetadata=async(mediaId:string,metadata:MediaMetadataUpdate)=>{try{setError(null);await invoke('update_media_metadata',{mediaId,metadata});const next=await invoke<MediaDetail|null>('media_detail',{id:mediaId});setDetail(next);await refresh();}catch(cause){setError(String(cause));throw cause;}};
+  const refreshMetadata=async(mediaId:string)=>{try{setMetadataLoading(true);setError(null);await invoke('refresh_media_metadata',{mediaId});const next=await invoke<MediaDetail|null>('media_detail',{id:mediaId});setDetail(next);await refresh();}catch(cause){setError(String(cause));throw cause;}finally{setMetadataLoading(false);}};
+  const refreshMetadataFromSettings=async(mediaId:string)=>{try{setError(null);await invoke('refresh_media_metadata',{mediaId});await refresh();}catch(cause){setError(String(cause));throw cause;}};
+  const applyMetadataCandidate=async(mediaId:string,candidate:MediaMetadataCandidate)=>{try{setMetadataLoading(true);setError(null);await invoke('apply_metadata_candidate',{mediaId,candidate,preserveTitle:true});const next=await invoke<MediaDetail|null>('media_detail',{id:mediaId});setDetail(next);await refresh();}catch(cause){setError(String(cause));throw cause;}finally{setMetadataLoading(false);}};
+  const applyMetadataCandidateFromSettings=async(mediaId:string,candidate:MediaMetadataCandidate)=>{try{setError(null);await invoke('apply_metadata_candidate',{mediaId,candidate,preserveTitle:false});setMetadataNotice(`Portada aplicada: ${candidate.title}. El cambio ya quedó guardado en la biblioteca.`);await refresh();}catch(cause){setError(String(cause));throw cause;}};
   const playMedia=async(id:string)=>{try{setError(null);const [detail,url]=await Promise.all([invoke<MediaDetail|null>('media_detail',{id}),invoke<string>('player_media_url',{mediaId:id})]);if(!detail||!url){setError('No se encontró el archivo para reproducir.');return;}const durationMs=detail.runtimeMs||detail.technical.durationMs||0;const resumeMs=detail.completed?0:Math.round(durationMs*(detail.progressPercent/100));setDetail(null);setPlayerSource({detail,url,resumeMs});}catch(cause){setError(`No se pudo abrir el reproductor interno: ${String(cause)}`);}};
   const openExternalMedia=async(id:string)=>{try{setError(null);await invoke('player_command',{command:{type:'play',media_id:id}});}catch(cause){setError(`No se pudo abrir reproductor externo: ${String(cause)}`);}};
   const playNextMedia=async(id:string)=>{try{setError(null);const [detail,url]=await Promise.all([invoke<MediaDetail|null>('media_detail',{id}),invoke<string>('player_media_url',{mediaId:id})]);if(!detail||!url){setError('No se encontro la siguiente parte para reproducir.');return;}setDetail(null);setPlayerSource({detail,url,resumeMs:0});}catch(cause){setError(`No se pudo abrir la siguiente parte: ${String(cause)}`);}};
@@ -95,7 +98,7 @@ export function App() {
   const installAvailableUpdate=async()=>{if(!availableUpdate)return;try{setUpdating(true);let downloaded=0;let contentLength=0;await availableUpdate.downloadAndInstall(event=>{if(event.event==='Started'){contentLength=event.data.contentLength||0;setUpdateMessage('Descargando actualización...');}else if(event.event==='Progress'){downloaded+=event.data.chunkLength;setUpdateMessage(contentLength?`Descargando ${Math.round(downloaded/contentLength*100)}%`:'Descargando actualización...');}else if(event.event==='Finished'){setUpdateMessage('Instalando actualización...');}});setUpdateMessage('Actualización instalada. En Windows la app se cerrará para terminar.');}catch(cause){setUpdateMessage(`No se pudo instalar la actualización: ${String(cause)}`);}finally{setUpdating(false);}};
   const hero=home.heroes[heroIndex];
   const libraryCounts=useMemo(()=>countLibrary(home.movies,home.series),[home.movies,home.series]);
-  const settingsProps=boot?{boot,scan,updating,updateMessage,updateVersion:availableUpdate?.version,onRescan:rescan,onChoose:chooseFolder,onLogout:logout,onCheckUpdates:checkForUpdates,onInstallUpdate:installAvailableUpdate,onResolveIdentification:resolveIdentification,onApplyMetadataCandidate:applyMetadataCandidate,onRefreshMetadata:refreshMetadata,remote:remoteStatus,remoteBusy,runRemoteAction}:null;
+  const settingsProps=boot?{boot,scan,updating,updateMessage,updateVersion:availableUpdate?.version,metadataNotice,onRescan:rescan,onChoose:chooseFolder,onLogout:logout,onCheckUpdates:checkForUpdates,onInstallUpdate:installAvailableUpdate,onResolveIdentification:resolveIdentification,onApplyMetadataCandidate:applyMetadataCandidateFromSettings,onRefreshMetadata:refreshMetadataFromSettings,remote:remoteStatus,remoteBusy,runRemoteAction}:null;
 
   if(boot&&!boot.activeAccount)return <AuthScreen boot={boot} mode={authMode} setMode={setAuthMode} pendingAccount={pendingAccount} onSubmit={submitAccount} onConfirmCreate={confirmCreateAccount} onCancelCreate={()=>setPendingAccount(null)} error={error} clearError={()=>setError(null)}/>;
 
@@ -118,7 +121,7 @@ export function App() {
       {!boot?<Loading/>:page==='Configuración'&&settingsProps?<RemoteSettingsPage {...settingsProps}/>:page==='Series'?<SeriesPage series={home.series} search={search} openSeries={setSeriesDetail}/>:page==='Inicio'&&!search?<HomePage home={home} hero={hero} heroIndex={heroIndex} setHeroIndex={setHeroIndex} openDetail={openDetail} openSeries={setSeriesDetail} setFlag={setFlag} playMedia={playMedia}/>:<CatalogPage title={page} items={visible} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>}
     </main>
     {seriesDetail&&<SeriesDetailModal series={seriesDetail} close={()=>setSeriesDetail(null)} openDetail={openDetail} playMedia={playMedia}/>}
-    {detail&&<DetailModal detail={detail} close={()=>setDetail(null)} setFlag={setFlag} playMedia={playMedia} openExternalMedia={openExternalMedia} onSaveMetadata={saveMetadata} onRefreshMetadata={refreshMetadata} onApplyCandidate={applyMetadataCandidate} openDetail={openDetail} metadataLoading={metadataLoading}/>}
+    {detail&&<DetailModal detail={detail} review={boot?.identificationReviews.find(item=>item.mediaId===detail.id)} close={()=>setDetail(null)} setFlag={setFlag} playMedia={playMedia} openExternalMedia={openExternalMedia} onSaveMetadata={saveMetadata} onRefreshMetadata={refreshMetadata} onApplyCandidate={applyMetadataCandidate} onResolveIdentification={resolveIdentification} openDetail={openDetail} metadataLoading={metadataLoading}/>}
     {playerSource&&settingsProps&&<InternalPlayer
       source={playerSource}
       onClose={()=>setPlayerSource(null)}
@@ -170,7 +173,44 @@ function ConfirmAccountModal({account,onConfirm,onCancel}:{account:PendingAccoun
         <button className="primary" onClick={()=>void onConfirm()}>Sí, crear cuenta</button>
       </div>
     </section>
-  </div>
+  </div>;
+}
+
+function MediaReviewDialog({detail,review,close,onSaveMetadata,onResolve,onApplyCandidate,onRetryMetadata,onChanged}:{detail:MediaDetail;review:IdentificationReview;close:()=>void;onSaveMetadata:(id:string,metadata:MediaMetadataUpdate)=>Promise<void>;onResolve:(mediaId:string,classification:ClassificationUpdate)=>Promise<void>;onApplyCandidate:(id:string,candidate:MediaMetadataCandidate)=>Promise<void>;onRetryMetadata:(id:string)=>Promise<void>;onChanged:()=>Promise<void>}){
+  const [artworkBusy,setArtworkBusy]=useState(false);
+  const [artworkMessage,setArtworkMessage]=useState('');
+  const [posterOptions,setPosterOptions]=useState<MediaMetadataCandidate[]>([]);
+  const [posterOptionsLoading,setPosterOptionsLoading]=useState(false);
+  const candidateKey=review.metadataCandidates.map(candidate=>candidate.id).join('|');
+  useEffect(()=>{
+    let cancelled=false;
+    setPosterOptionsLoading(true);
+    invoke<MediaMetadataCandidate[]>('metadata_poster_options',{mediaId:detail.id})
+      .then(options=>{if(!cancelled)setPosterOptions(options);})
+      .catch(()=>{if(!cancelled)setPosterOptions([]);})
+      .finally(()=>{if(!cancelled)setPosterOptionsLoading(false);});
+    return()=>{cancelled=true;};
+  },[candidateKey,detail.id,detail.metadataSourceUrl,detail.metadataStatus]);
+  const chooseArtwork=async(field:'posterPath'|'backdropPath')=>{
+    const selected=await open({multiple:false,directory:false,title:field==='posterPath'?'Elegir una portada propia':'Elegir un fondo propio',filters:[{name:'Imagen',extensions:['png','jpg','jpeg','webp']}]});
+    if(typeof selected!=='string')return;
+    try{
+      setArtworkBusy(true);setArtworkMessage('');
+      await onSaveMetadata(detail.id,{title:detail.title,year:detail.year??null,overview:detail.overview||null,genres:detail.genres,cast:detail.cast,posterPath:field==='posterPath'?selected:null,backdropPath:field==='backdropPath'?selected:null});
+      setArtworkMessage(field==='posterPath'?'Portada propia aplicada y guardada.':'Fondo propio aplicado y guardado.');
+    }catch(cause){setArtworkMessage(`No se pudo guardar la imagen: ${String(cause)}`);}
+    finally{setArtworkBusy(false);}
+  };
+  const reviewWithPosters=posterOptions.length?{...review,metadataCandidates:posterOptions}:review;
+  return <div className="media-review-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)close();}}>
+    <section className="media-review-dialog" role="dialog" aria-modal="true" aria-label={`Revisión de ${displayTitle(detail)}`}>
+      <header><div><span className="eyebrow">REVISIÓN INDIVIDUAL</span><h2>{displayTitle(detail)}</h2><p>Corregí esta ficha sin buscarla en la lista general de Configuración.</p></div><button className="modal-close" onClick={close} aria-label="Cerrar revisión"><X/></button></header>
+      <div className="manual-artwork-panel"><div><ImagePlus/><span><b>Imágenes propias</b><small>La imagen elegida se copia a la caché y al paquete portátil `.cinewana`.</small></span></div><div><button disabled={artworkBusy} onClick={()=>void chooseArtwork('posterPath')}><ImagePlus/>Elegir portada</button><button disabled={artworkBusy} onClick={()=>void chooseArtwork('backdropPath')}><ImagePlus/>Elegir fondo</button></div></div>
+      {artworkMessage&&<div className={`metadata-card-message ${artworkMessage.includes('aplicad')?'success':'error'}`} role="status">{artworkMessage.includes('aplicad')?<Check/>:<CircleAlert/>}<span>{artworkMessage}</span></div>}
+      {posterOptionsLoading&&<div className="poster-options-loading"><LoaderCircle className="spin"/>Buscando portadas alternativas en TMDB…</div>}
+      <IdentificationReviewCard review={reviewWithPosters} onResolve={onResolve} onApplyCandidate={onApplyCandidate} onRetryMetadata={onRetryMetadata} onChanged={onChanged}/>
+    </section>
+  </div>;
 }
 
 function HomePage({home,hero,heroIndex,setHeroIndex,openDetail,openSeries,setFlag,playMedia}:{home:HomeDto;hero?:MediaSummary;heroIndex:number;setHeroIndex:(n:number)=>void;openDetail:(id:string)=>void;openSeries:(series:SeriesSummary)=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void}){
@@ -185,7 +225,7 @@ function HomePage({home,hero,heroIndex,setHeroIndex,openDetail,openSeries,setFla
     <MediaRow title="Películas" items={home.movies} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>
     <SeriesCarouselRow title="Series" series={home.series} openSeries={openSeries}/>
     <MediaRow title="Favoritos" items={home.favorites} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>
-  </div>
+  </div>;
 }
 
 function EmptyLibrary(){return <section className="empty-library"><Library size={42}/><h1>Tu sala está lista</h1><p>Conectá la carpeta predeterminada o elegí otra desde Configuración y después reescaneá.</p></section>}
@@ -200,19 +240,20 @@ function SettingsPage({boot,scan,updating,updateMessage,updateVersion,onRescan,o
 
 function TmdbCreditsCard(){return <div className="content settings-page tmdb-credits"><section className="settings-card compact"><div className="tmdb-logo"><img src={tmdbLogo} alt="The Movie Database (TMDB)"/></div><div className="settings-main"><div className="settings-title"><div><h2>Créditos de datos e imágenes</h2><p>Portadas, fondos y fichas proporcionados por <a href="https://www.themoviedb.org" target="_blank" rel="noreferrer">TMDB</a>.</p></div></div><p className="tmdb-notice">This product uses the TMDB API but is not endorsed or certified by TMDB.</p></div></section></div>}
 
-function IdentificationReviewSettings({reviews,onResolve,onApplyCandidate,onRetryMetadata}:{reviews:IdentificationReview[];onResolve:(mediaId:string,classification:ClassificationUpdate)=>Promise<void>;onApplyCandidate:(mediaId:string,candidate:MediaMetadataCandidate)=>Promise<void>;onRetryMetadata:(mediaId:string)=>Promise<void>}){
+function IdentificationReviewSettings({reviews,metadataNotice,onResolve,onApplyCandidate,onRetryMetadata}:{reviews:IdentificationReview[];metadataNotice:string|null;onResolve:(mediaId:string,classification:ClassificationUpdate)=>Promise<void>;onApplyCandidate:(mediaId:string,candidate:MediaMetadataCandidate)=>Promise<void>;onRetryMetadata:(mediaId:string)=>Promise<void>}){
   return <div className="content settings-page identification-settings">
     <section className="settings-card">
       <div className="settings-icon"><CircleAlert/></div>
       <div className="settings-main">
         <div className="settings-title"><div><h2>Errores y coincidencias por revisar</h2><p>Títulos dudosos y portadas de TMDB que necesitan tu decisión</p></div><span className={`root-status ${reviews.length?'pending':'online'}`}>{reviews.length} pendientes</span></div>
+        {metadataNotice&&<div className="metadata-applied-notice" role="status"><Check/><div><b>{metadataNotice}</b><span>Si esa película también necesita corregir el nombre o el tipo, seguirá apareciendo como pendiente.</span></div></div>}
         {reviews.length===0?<div className="identification-empty"><Check/>No hay películas, episodios ni portadas dudosas.</div>:<div className="identification-review-list">{reviews.map(review=><IdentificationReviewCard key={review.mediaId} review={review} onResolve={onResolve} onApplyCandidate={onApplyCandidate} onRetryMetadata={onRetryMetadata}/>)}</div>}
       </div>
     </section>
-  </div>
+  </div>;
 }
 
-function IdentificationReviewCard({review,onResolve,onApplyCandidate,onRetryMetadata}:{review:IdentificationReview;onResolve:(mediaId:string,classification:ClassificationUpdate)=>Promise<void>;onApplyCandidate:(mediaId:string,candidate:MediaMetadataCandidate)=>Promise<void>;onRetryMetadata:(mediaId:string)=>Promise<void>}){
+export function IdentificationReviewCard({review,onResolve,onApplyCandidate,onRetryMetadata,onChanged}:{review:IdentificationReview;onResolve:(mediaId:string,classification:ClassificationUpdate)=>Promise<void>;onApplyCandidate:(mediaId:string,candidate:MediaMetadataCandidate)=>Promise<void>;onRetryMetadata:(mediaId:string)=>Promise<void>;onChanged?:()=>Promise<void>}){
   const [kind,setKind]=useState(review.kind);
   const [title,setTitle]=useState(review.title);
   const [seriesTitle,setSeriesTitle]=useState(review.seriesTitle||'');
@@ -223,13 +264,18 @@ function IdentificationReviewCard({review,onResolve,onApplyCandidate,onRetryMeta
   const [revealError,setRevealError]=useState('');
   const [rescanMessage,setRescanMessage]=useState('');
   const [metadataBusy,setMetadataBusy]=useState(false);
+  const [metadataMessage,setMetadataMessage]=useState('');
+  useEffect(()=>{
+    setKind(review.kind);setTitle(review.title);setSeriesTitle(review.seriesTitle||'');
+    setSeasonNumber(review.seasonNumber?.toString()||'');setEpisodeNumber(review.episodeNumber?.toString()||'');
+  },[review.episodeNumber,review.kind,review.mediaId,review.seasonNumber,review.seriesTitle,review.title]);
   const valid=title.trim().length>0&&(kind==='movie'||(seriesTitle.trim().length>0&&Number(seasonNumber)>0&&Number(episodeNumber)>0));
   const save=async()=>{
     if(!valid)return;
     setSaving(true);
     try{
       await onResolve(review.mediaId,{kind,title:title.trim(),seriesTitle:kind==='episode'?seriesTitle.trim():null,seasonNumber:kind==='episode'?Number(seasonNumber):null,episodeNumber:kind==='episode'?Number(episodeNumber):null});
-    }finally{setSaving(false);}
+    }catch(cause){setRescanMessage(`No se pudo guardar la identificación: ${String(cause)}`);}finally{setSaving(false);}
   };
   const reveal=async()=>{
     try{setRevealError('');await invoke('reveal_media_file',{mediaId:review.mediaId});}
@@ -240,15 +286,18 @@ function IdentificationReviewCard({review,onResolve,onApplyCandidate,onRetryMeta
       setRescanning(true);setRescanMessage('');
       const stillNeedsReview=await invoke<boolean>('rescan_media_item',{mediaId:review.mediaId});
       setRescanMessage(stillNeedsReview?'El nuevo nombre todavia necesita revision.':'Identificacion corregida. Quitando esta alerta...');
+      await onChanged?.();
     }catch(cause){setRescanMessage(String(cause));}
     finally{setRescanning(false);}
   };
-  const chooseCandidate=async(candidate:MediaMetadataCandidate)=>{try{setMetadataBusy(true);await onApplyCandidate(review.mediaId,candidate);}finally{setMetadataBusy(false);}};
-  const retryMetadata=async()=>{try{setMetadataBusy(true);await onRetryMetadata(review.mediaId);}finally{setMetadataBusy(false);}};
+  const chooseCandidate=async(candidate:MediaMetadataCandidate)=>{try{setMetadataBusy(true);setMetadataMessage('');await onApplyCandidate(review.mediaId,candidate);setMetadataMessage(`Portada aplicada: ${candidate.title}.`);}catch(cause){setMetadataMessage(`No se pudo aplicar la portada: ${String(cause)}`);}finally{setMetadataBusy(false);}};
+  const retryMetadata=async()=>{try{setMetadataBusy(true);setMetadataMessage('');await onRetryMetadata(review.mediaId);}catch(cause){setMetadataMessage(`No se pudo buscar en TMDB: ${String(cause)}`);}finally{setMetadataBusy(false);}};
+  const hasIssue=review.identificationPending||['ambiguous','not_found','artwork_missing','pending'].includes(review.metadataStatus);
   return <article className="identification-review-card">
-    <div className="identification-warning"><CircleAlert/><div><b>{review.fileName}</b><span>{review.reason}</span>{revealError&&<small>{revealError}</small>}{rescanMessage&&<small>{rescanMessage}</small>}</div><div className="identification-file-actions"><button onClick={()=>void reveal()}><FolderOpen/>Mostrar archivo</button><button disabled={rescanning} onClick={()=>void rescanOne()}>{rescanning?<LoaderCircle className="spin"/>:<RefreshCw/>}Reescanear este archivo</button></div></div>
+    <div className={`identification-warning ${hasIssue?'':'resolved'}`}>{hasIssue?<CircleAlert/>:<Check/>}<div><b>{review.fileName}</b><span>{review.reason}</span>{revealError&&<small>{revealError}</small>}{rescanMessage&&<small>{rescanMessage}</small>}</div><div className="identification-file-actions"><button onClick={()=>void reveal()}><FolderOpen/>Mostrar archivo</button><button disabled={rescanning} onClick={()=>void rescanOne()}>{rescanning?<LoaderCircle className="spin"/>:<RefreshCw/>}Reescanear este archivo</button></div></div>
     <div className="identification-kind"><button className={kind==='movie'?'selected':''} onClick={()=>setKind('movie')}>Pelicula</button><button className={kind==='episode'?'selected':''} onClick={()=>setKind('episode')}>Serie / episodio</button></div>
-    {review.metadataCandidates.length>0&&<div className="metadata-candidates">{review.metadataCandidates.map(candidate=><button key={candidate.id} disabled={metadataBusy} onClick={()=>void chooseCandidate(candidate)}>{candidate.posterUrl&&<img src={candidate.posterUrl} alt={`Portada de ${candidate.title}`}/>}<b>{candidate.title}</b><span>{candidate.year||'Sin año'} · TMDB</span>{candidate.description&&<small>{candidate.description}</small>}</button>)}</div>}
+    {metadataMessage&&<div className={`metadata-card-message ${metadataMessage.startsWith('Portada aplicada')?'success':'error'}`} role="status">{metadataMessage.startsWith('Portada aplicada')?<Check/>:<CircleAlert/>}<span>{metadataMessage}</span></div>}
+    {review.metadataCandidates.length>0&&<div className="metadata-candidates">{review.metadataCandidates.map(candidate=><button key={candidate.id} aria-label={`Usar portada ${candidate.title}`} disabled={metadataBusy} onClick={()=>void chooseCandidate(candidate)}>{candidate.posterUrl&&<img src={candidate.posterUrl} alt={`Portada de ${candidate.title}`}/>}<b>{candidate.title}</b><span>{candidate.year||'Sin año'} · TMDB</span>{candidate.description&&<small>{candidate.description}</small>}<strong className="metadata-candidate-action"><Check/>Usar esta portada</strong></button>)}</div>}
     <div className="identification-fields">
       <label><span>{kind==='movie'?'Titulo de la pelicula':'Titulo del episodio'}</span><input value={title} onChange={event=>setTitle(event.target.value)}/></label>
       {kind==='episode'&&<><label><span>Serie</span><input value={seriesTitle} onChange={event=>setSeriesTitle(event.target.value)}/></label><label><span>Temporada</span><input inputMode="numeric" value={seasonNumber} onChange={event=>setSeasonNumber(event.target.value.replace(/\D/g,''))}/></label><label><span>Episodio</span><input inputMode="numeric" value={episodeNumber} onChange={event=>setEpisodeNumber(event.target.value.replace(/\D/g,''))}/></label></>}
@@ -257,11 +306,11 @@ function IdentificationReviewCard({review,onResolve,onApplyCandidate,onRetryMeta
   </article>
 }
 
-type SettingsProps={boot:Bootstrap;scan:ScanProgress;updating:boolean;updateMessage:string|null;updateVersion?:string;onRescan:()=>void;onChoose:()=>void;onLogout:()=>void;onCheckUpdates:()=>void;onInstallUpdate:()=>void;onResolveIdentification:(mediaId:string,classification:ClassificationUpdate)=>Promise<void>;onApplyMetadataCandidate:(mediaId:string,candidate:MediaMetadataCandidate)=>Promise<void>;onRefreshMetadata:(mediaId:string)=>Promise<void>};
+type SettingsProps={boot:Bootstrap;scan:ScanProgress;updating:boolean;updateMessage:string|null;updateVersion?:string;metadataNotice:string|null;onRescan:()=>void;onChoose:()=>void;onLogout:()=>void;onCheckUpdates:()=>void;onInstallUpdate:()=>void;onResolveIdentification:(mediaId:string,classification:ClassificationUpdate)=>Promise<void>;onApplyMetadataCandidate:(mediaId:string,candidate:MediaMetadataCandidate)=>Promise<void>;onRefreshMetadata:(mediaId:string)=>Promise<void>};
 function RemoteSettingsPage(props:SettingsProps&{remote:RemoteStatus|null;remoteBusy:boolean;runRemoteAction:(command:string,args?:Record<string,unknown>)=>Promise<void>}){
   const {remote,remoteBusy,runRemoteAction,onResolveIdentification,onApplyMetadataCandidate,onRefreshMetadata,...settings}=props;
   const copyUrl=async()=>{if(remote?.pairing?.url)await navigator.clipboard.writeText(remote.pairing.url);else if(remote?.url)await navigator.clipboard.writeText(remote.url);};
-  return <div className="cw-shared-settings"><SettingsPage {...settings}/><TmdbCreditsCard/><IdentificationReviewSettings reviews={props.boot.identificationReviews} onResolve={onResolveIdentification} onApplyCandidate={onApplyMetadataCandidate} onRetryMetadata={onRefreshMetadata}/><div className="content settings-page remote-settings-section"><section className="settings-card remote-settings-card"><div className="settings-icon"><Radio/></div><div className="settings-main">
+  return <div className="cw-shared-settings"><SettingsPage {...settings}/><TmdbCreditsCard/><IdentificationReviewSettings reviews={props.boot.identificationReviews} metadataNotice={props.metadataNotice} onResolve={onResolveIdentification} onApplyCandidate={onApplyMetadataCandidate} onRetryMetadata={onRefreshMetadata}/><div className="content settings-page remote-settings-section"><section className="settings-card remote-settings-card"><div className="settings-icon"><Radio/></div><div className="settings-main">
     <div className="settings-title"><div><h2>Control remoto</h2><p>Vinculación privada desde la misma red Wi‑Fi</p></div><span className={`root-status ${remote?.enabled?'online':''}`}>{remote?.enabled?'Activo':'Desactivado'}</span></div>
     {!remote?.assetRootReady&&<div className="remote-notice"><CircleAlert/>La interfaz móvil todavía no está compilada. El botón Activar la compilará antes de la prueba.</div>}
     {remote?.error&&<div className="remote-notice error"><CircleAlert/>{remote.error}</div>}
@@ -280,22 +329,32 @@ const addTag=(value:string,tag:string)=>parseList(`${value},${tag}`).join(', ');
 const detailToForm=(detail:MediaDetail)=>({title:displayTitle(detail),year:detail.year?.toString()||'',overview:detail.overview||'',genres:detail.genres.join(', '),cast:detail.cast.join(', '),posterPath:'',backdropPath:''});
 const metadataLabel=(status:string)=>status==='imported'?'TMDB importado':status==='ambiguous'?'Elegir portada':status==='not_found'?'Revisar título':status==='artwork_missing'?'Falta portada':'Información pendiente';
 const metadataSourceLabel=(url:string)=>url.includes('themoviedb.org')?'TMDB':'Wikipedia (anterior)';
+const detailReview=(detail:MediaDetail):IdentificationReview=>({
+  mediaId:detail.id,fileName:detail.fileName,kind:detail.kind,title:detail.title,
+  seriesTitle:detail.seriesTitle,seasonNumber:detail.seasonNumber,episodeNumber:detail.episodeNumber,
+  reason:detail.metadataStatus==='imported'?'No hay errores detectados. Igualmente podés cambiar la identificación o las imágenes.':detail.metadataStatus==='ambiguous'?'TMDB encontró varias coincidencias posibles. Elegí la correcta.':detail.metadataStatus==='not_found'?'TMDB no encontró una coincidencia segura. Corregí el título o volvé a buscar.':detail.metadataStatus==='artwork_missing'?'La portada guardada no está disponible. Elegí otra coincidencia o una imagen propia.':'La información externa todavía está pendiente.',
+  identificationPending:false,metadataStatus:detail.metadataStatus,metadataCandidates:detail.metadataCandidates,
+});
+const reviewHasIssue=(review:IdentificationReview)=>review.identificationPending||['ambiguous','not_found','artwork_missing','pending'].includes(review.metadataStatus);
 
-function DetailModal({detail,close,setFlag,playMedia,openExternalMedia,onSaveMetadata,onRefreshMetadata,onApplyCandidate,openDetail,metadataLoading}:{detail:MediaDetail;close:()=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void;openExternalMedia:(id:string)=>void;onSaveMetadata:(id:string,metadata:MediaMetadataUpdate)=>Promise<void>;onRefreshMetadata:(id:string)=>Promise<void>;onApplyCandidate:(id:string,candidate:MediaMetadataCandidate)=>Promise<void>;openDetail:(id:string)=>void;metadataLoading:boolean}){
+function DetailModal({detail,review,close,setFlag,playMedia,openExternalMedia,onSaveMetadata,onRefreshMetadata,onApplyCandidate,onResolveIdentification,openDetail,metadataLoading}:{detail:MediaDetail;review?:IdentificationReview;close:()=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void;openExternalMedia:(id:string)=>void;onSaveMetadata:(id:string,metadata:MediaMetadataUpdate)=>Promise<void>;onRefreshMetadata:(id:string)=>Promise<void>;onApplyCandidate:(id:string,candidate:MediaMetadataCandidate)=>Promise<void>;onResolveIdentification:(mediaId:string,classification:ClassificationUpdate)=>Promise<void>;openDetail:(id:string)=>Promise<void>;metadataLoading:boolean}){
   const [editing,setEditing]=useState(false);
+  const [reviewOpen,setReviewOpen]=useState(false);
   const [form,setForm]=useState(()=>detailToForm(detail));
   useEffect(()=>{setEditing(false);setForm(detailToForm(detail));},[detail]);
   const chooseImage=async(field:'posterPath'|'backdropPath')=>{
     const selected=await open({multiple:false,directory:false,title:field==='posterPath'?'Elegir portada':'Elegir fondo',filters:[{name:'Imagen',extensions:['png','jpg','jpeg','webp']}]});
     if(typeof selected==='string')setForm(prev=>({...prev,[field]:selected}));
   };
-  const save=async()=>{await onSaveMetadata(detail.id,{title:form.title,year:form.year.trim()?Number(form.year):null,overview:form.overview.trim()||null,genres:parseList(form.genres),cast:parseList(form.cast),posterPath:form.posterPath||null,backdropPath:form.backdropPath||null});setEditing(false);};
-  return <div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)close();}}>
+  const save=async()=>{try{await onSaveMetadata(detail.id,{title:form.title,year:form.year.trim()?Number(form.year):null,overview:form.overview.trim()||null,genres:parseList(form.genres),cast:parseList(form.cast),posterPath:form.posterPath||null,backdropPath:form.backdropPath||null});setEditing(false);}catch{/* El aviso global conserva el error y el formulario queda abierto. */}};
+  const currentReview=review??detailReview(detail);
+  const hasReviewIssue=reviewHasIssue(currentReview);
+  return <><div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)close();}}>
     <section className="detail-modal detail-modal-expanded" style={{'--detail-backdrop':detail.backdropUrl?`url("${assetUrl(detail.backdropUrl)}")`:'none'} as React.CSSProperties}>
       <button className="modal-close" onClick={close}><X/></button>
       <div className="detail-art"><Poster title={displayTitle(detail)} label={detail.kind==='episode'?'SERIE':quality(detail)} src={detail.artworkUrl}/>{editing&&<div className="art-buttons"><button onClick={()=>void chooseImage('posterPath')}><ImagePlus/>Portada</button><button onClick={()=>void chooseImage('backdropPath')}><ImagePlus/>Fondo</button></div>}</div>
       <div className="detail-copy">
-        <div className="detail-headline"><span className="eyebrow">{detail.kind==='episode'?`TEMPORADA ${detail.seasonNumber} · EPISODIO ${detail.episodeNumber}`:'PELÍCULA'}</span><div><button disabled={metadataLoading} onClick={()=>void onRefreshMetadata(detail.id)}>{metadataLoading?<LoaderCircle className="spin"/>:<RefreshCw/>}Volver a buscar información</button><button onClick={()=>setEditing(value=>!value)}><Pencil/>Editar datos</button></div></div>
+        <div className="detail-headline"><span className="eyebrow">{detail.kind==='episode'?`TEMPORADA ${detail.seasonNumber} · EPISODIO ${detail.episodeNumber}`:'PELÍCULA'}</span><div><button disabled={metadataLoading} onClick={()=>void onRefreshMetadata(detail.id).catch(()=>{})}>{metadataLoading?<LoaderCircle className="spin"/>:<RefreshCw/>}Volver a buscar información</button><button onClick={()=>setEditing(value=>!value)}><Pencil/>Editar datos</button></div></div>
         {editing?<div className="metadata-editor">
           <label><span>Título</span><input value={form.title} onChange={e=>setForm({...form,title:e.target.value})}/></label>
           <label><span>Año</span><input value={form.year} onChange={e=>setForm({...form,year:e.target.value.replace(/\D/g,'').slice(0,4)})}/></label>
@@ -308,15 +367,16 @@ function DetailModal({detail,close,setFlag,playMedia,openExternalMedia,onSaveMet
           <div className="detail-meta"><span>{detail.year||'Sin año'}</span><span>{quality(detail)}</span>{detail.technical.hdrType&&<span>{detail.technical.hdrType}</span>}{detail.runtimeMs&&<span>{formatDuration(detail.runtimeMs)}</span>}{detail.manualMetadata&&<span>EDITADO</span>}<span>{metadataLabel(detail.metadataStatus)}</span></div>
           <div className="genre-pills">{detail.genres.length?detail.genres.map(genre=><span key={genre}><Tags size={12}/>{genre}</span>):<span><Tags size={12}/>Sin género</span>}</div>
           <p className="overview">{detail.overview||'Todavía no hay descripción. Podés editar esta ficha y agregar la sinopsis, género, actores y portada.'}</p>
+          <button className={`detail-review-button ${hasReviewIssue?'pending':''}`} onClick={()=>setReviewOpen(true)}>{hasReviewIssue?<CircleAlert/>:<ShieldCheck/>}<span><b>Revisión</b><small>{hasReviewIssue?currentReview.reason:'Identidad, portada y archivo'}</small></span></button>
           <div className="cast-block"><h3><Users size={15}/> Reparto</h3>{detail.cast.length?<p>{detail.cast.join(', ')}</p>:<p>Sin actores cargados.</p>}</div>
-          <div className="metadata-source"><h3>Información externa</h3>{detail.metadataSourceUrl?<p>Fuente: <a href={detail.metadataSourceUrl} target="_blank" rel="noreferrer">{metadataSourceLabel(detail.metadataSourceUrl)}</a>{detail.metadataImportedAt?` · ${new Date(detail.metadataImportedAt).toLocaleDateString('es-AR')}`:''}</p>:<p>{detail.metadataStatus==='ambiguous'?'TMDB encontró varias posibilidades. Elegí la portada correcta abajo o desde Configuración.':detail.metadataStatus==='not_found'?'TMDB no encontró una coincidencia segura. Revisá el título desde Configuración.':'Todavía no hay una fuente externa guardada.'}</p>}{detail.metadataCandidates.length>0&&<div className="metadata-candidates">{detail.metadataCandidates.map(candidate=><button key={candidate.id} disabled={metadataLoading} onClick={()=>void onApplyCandidate(detail.id,candidate)}>{candidate.posterUrl&&<img src={candidate.posterUrl} alt={`Portada de ${candidate.title}`}/>}<b>{candidate.title}</b><span>{candidate.year||'Sin año'} · TMDB</span>{candidate.description&&<small>{candidate.description}</small>}</button>)}</div>}</div>
+          <div className="metadata-source"><h3>Información externa</h3>{detail.metadataSourceUrl?<p>Fuente: <a href={detail.metadataSourceUrl} target="_blank" rel="noreferrer">{metadataSourceLabel(detail.metadataSourceUrl)}</a>{detail.metadataImportedAt?` · ${new Date(detail.metadataImportedAt).toLocaleDateString('es-AR')}`:''}</p>:<p>{detail.metadataStatus==='ambiguous'?'TMDB encontró varias posibilidades. Abrí Revisión para elegir la correcta.':detail.metadataStatus==='not_found'?'TMDB no encontró una coincidencia segura. Abrí Revisión para corregirla.':'Todavía no hay una fuente externa guardada.'}</p>}</div>
         </>}
         <div className="detail-actions"><button className="primary" onClick={()=>void playMedia(detail.id)}><Play fill="currentColor"/>Reproducir en CINE WANA</button><button onClick={()=>void openExternalMedia(detail.id)}>Abrir externo</button><button className={detail.inWatchlist?'selected':''} onClick={()=>void setFlag(detail,'watchlist')}><Bookmark/>Mi lista</button><button className={detail.favorite?'selected':''} onClick={()=>void setFlag(detail,'favorite')}><Heart/>Favorito</button></div>
         <div className="technical"><h3>Información técnica</h3><dl><div><dt>Archivo</dt><dd>{detail.fileName}</dd></div><div><dt>Contenedor</dt><dd>{detail.technical.container||'Pendiente de ffprobe'}</dd></div><div><dt>Video</dt><dd>{detail.technical.videoCodec||'Sin analizar'}</dd></div><div><dt>Audio</dt><dd>{detail.technical.audioCodec||'Sin analizar'}</dd></div><div><dt>Subtítulos externos</dt><dd>{detail.tracks.filter(t=>t.external).length}</dd></div></dl></div>
         {detail.recommendations.length>0&&<section className="recommendations"><h3>Más para ver</h3><div>{detail.recommendations.map(item=><button key={item.id} onClick={()=>openDetail(item.id)}><Poster title={displayTitle(item)} label={item.kind==='episode'?'SERIE':quality(item)} src={item.artworkUrl}/><span>{displayTitle(item)}</span></button>)}</div></section>}
       </div>
     </section>
-  </div>
+  </div>{reviewOpen&&<MediaReviewDialog detail={detail} review={currentReview} close={()=>setReviewOpen(false)} onSaveMetadata={onSaveMetadata} onResolve={onResolveIdentification} onApplyCandidate={onApplyCandidate} onRetryMetadata={onRefreshMetadata} onChanged={()=>openDetail(detail.id)}/>}</>
 }
 
 function CarouselRow({label,children}:{label:string;children:React.ReactNode}){

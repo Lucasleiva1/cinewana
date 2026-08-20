@@ -34,6 +34,8 @@
 - Added non-destructive image scanning and runtime adjustments for brightness, contrast, saturation, shadows, highlights, and temperature
 - Moved internal-player image scanning to Rust/FFmpeg so scene, light, and color analysis works with local Tauri media URLs without browser canvas security errors
 - Image scanning now pauses playback, reports live scan progress, and resumes from the original playback position when finished
+- Image analysis now runs only once per active playback session, reopens instantly with its existing measurements and adjustments, and is discarded when that title leaves the player without writing analysis residue to disk
+- Hid the automatic suggested image adjustment after playback review found its shadow correction too aggressive; measurements and manual controls remain available, and the implementation is retained behind an internal flag for later recalibration
 - Opening Image now starts its scan automatically from both the desktop player and the local-network remote control
 - Reworked shadows/highlights adjustment as a tonal curve so shadow correction no longer washes the whole frame white
 - Added automatic numbered movie-sequel handoff for local sagas, with a cancellable next-up prompt near the end of playback
@@ -76,6 +78,10 @@
 - Replaced the active Wikipedia flow with TMDB while retaining the Wikipedia client disabled for rollback
 - Added persistent official TMDB posters, backdrops, localized details, genres, and cast, with movie and series/episode-specific lookup
 - Added poster-first ambiguity review in Settings, including candidate cover previews, missing-title errors, manual correction, and retry
+- Poster candidates in Settings now apply on click without opening the large title view, expose an explicit **Usar esta portada** action, confirm the saved change, and keep any separate name/classification correction visible until it is resolved
+- Every movie and episode detail now includes a compact **Revisión** entry that opens a focused correction window for that title, without requiring the user to find it again in the global Settings list
+- Individual review now keeps alternative-language TMDB matches available for manual confirmation (for example, a local Spanish title matching its English TMDB title), preserves the user's visible title when applying that match, and offers multiple official posters
+- Individual review accepts a user-selected JPG, PNG, or WebP poster/background; CINE WANA copies it into its private cache and the title's portable `.cinewana` package without modifying the original video or the source image
 - Made TMDB metadata and artwork reusable without online lookup after import, independent of the Windows install directory, with cache-path rebasing for a transferred application-data directory
 - Added the official TMDB attribution and a 180-day refresh eligibility window for compliance with TMDB's cache terms
 
@@ -94,7 +100,8 @@
 - The library footer now separates movie, series, and chapter totals; series cards show chapter totals with a per-season breakdown, and every season header reports its own chapter count
 - Episode rows display a generated video thumbnail, play/detail actions, watch progress, and a short stored description when available
 - Unchanged files are reconciled from size and modification time before FFprobe/fingerprint work, avoiding repeated full analysis and duplicate catalog records
-- CINE WANA writes lightweight identification/description JSON manifests only to its private application cache; configured media roots remain read-only
+- Changing the library folder now preserves one root identity instead of adding a second catalog, hides inactive roots from every user-facing query, and consolidates legacy cross-disk duplicates by fingerprint while retaining progress, flags, history, manual decisions, and cached metadata
+- Every scanned title now receives a stable portable identity and a `.cinewana/items/<id>/metadata.json` package beside its video, including identification, manual corrections, TMDB state, poster, and backdrop; SQLite remains the fast rebuildable cache and original videos remain untouched
 - Home keeps recently added movies chronological while rotating the main movie shelf and featured titles once per local calendar day
 
 ## Pending after the functional media pass
@@ -111,6 +118,7 @@
 - Remote-control Settings now includes a persistent **Siempre activo** switch that starts the authenticated local service automatically when CINE WANA opens while preserving the manual activate/deactivate button
 - Prepared version 0.3.6 as the signed updater release for in-player access to the shared Settings view and persistent automatic remote-control startup
 - Prepared version 0.3.7 as the signed updater release for persistent TMDB artwork and metadata, poster-first identification review, player chrome inactivity fixes, and complete movie/series/chapter counts
+- Prepared version 0.3.8 as the signed updater release for portable `.cinewana` metadata packages, individual title correction with local artwork, and one-pass image analysis per playback session
 
 - Prepared version 0.2.1 as the installable Windows x64 test update that exposes **Configuración → Control remoto** in the desktop application
 - Prepared version 0.3.0-rc.1 as the important pre-final updater release for resilient series identification, targeted rescans, daily discovery rotation, and the local remote-control PWA

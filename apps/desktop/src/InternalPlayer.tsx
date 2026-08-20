@@ -15,6 +15,7 @@ import {
   resolveVolumeWithDetent,
   seekSecondsForPoint,
   shouldPinPlayerChrome,
+  shouldStartImageAnalysis,
 } from './playerControls';
 
 export interface InternalPlayerSource {
@@ -34,6 +35,7 @@ const defaultImage: ImageSettings = {
 
 const CONTROLS_HIDE_DELAY_MS = 2600;
 const SINGLE_CLICK_DELAY_MS = 240;
+const SHOW_SUGGESTED_IMAGE_ADJUSTMENT = false;
 
 interface PlayerAudioGraph {
   context: AudioContext;
@@ -445,7 +447,7 @@ export function InternalPlayer({
   }, [nextUp, onPlayNext, saveProgress]);
 
   const analyzeImage = useCallback(async () => {
-    if (imageAnalysisRunningRef.current) return;
+    if (!shouldStartImageAnalysis(Boolean(analysis), imageAnalysisRunningRef.current)) return;
     imageAnalysisRunningRef.current = true;
     const video = videoRef.current;
     const resumeAt = Number.isFinite(video?.currentTime) ? video!.currentTime : current;
@@ -487,7 +489,7 @@ export function InternalPlayer({
         }
       }
     }
-  }, [current, playing, source.detail.id]);
+  }, [analysis, current, playing, source.detail.id]);
 
   const toggleImagePanel = useCallback(() => {
     if (showImagePanel) {
@@ -812,7 +814,7 @@ export function InternalPlayer({
             <button onClick={() => setShowImagePanel(false)}><X size={16}/></button>
           </div>
           <button className="cw-analyze" onClick={analyzeImage} disabled={analyzing}>
-            <Sparkles size={15}/>{analyzing ? 'Analizando escenas…' : 'Escanear video'}
+            <Sparkles size={15}/>{analyzing ? 'Analizando escenas…' : analysis ? 'Video ya escaneado' : 'Escanear video'}
           </button>
           {analyzing && (
             <div className="cw-analysis-progress">
@@ -829,7 +831,9 @@ export function InternalPlayer({
               <div><span>Saturacion</span><b>{analysis.averageSaturation}%</b></div>
               <div><span>Dominante</span><b>{signedNumber(analysis.warmth)}</b></div>
               <small>{analysis.sampledFrames} escenas revisadas con FFmpeg.</small>
-              <button onClick={() => setImage(analysis.suggested)}>Aplicar sugerido</button>
+              {SHOW_SUGGESTED_IMAGE_ADJUSTMENT && (
+                <button onClick={() => setImage(analysis.suggested)}>Aplicar sugerido</button>
+              )}
             </div>
           )}
           {([
@@ -845,7 +849,7 @@ export function InternalPlayer({
               <input min={min} max={max} step={1} type="range" value={image[key]} onChange={event => setImage(prev => ({...prev, [key]: Number(event.target.value)}))}/>
             </label>
           ))}
-          <button className="cw-reset-image" onClick={() => { setImage(defaultImage); setAnalysis(null); }}>Reset imagen</button>
+          <button className="cw-reset-image" onClick={() => setImage(defaultImage)}>Reset imagen</button>
         </aside>
       )}
 

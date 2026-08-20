@@ -155,6 +155,37 @@ pub struct ImportedMediaMetadata {
     pub backdrop_url: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PortableMediaMetadata {
+    pub schema_version: u32,
+    pub portable_id: String,
+    pub video_file_name: String,
+    pub file_size: i64,
+    pub fingerprint: String,
+    pub kind: MediaKind,
+    pub title: String,
+    pub year: Option<i32>,
+    pub overview: Option<String>,
+    pub genres: Vec<String>,
+    pub cast: Vec<String>,
+    pub series_title: Option<String>,
+    pub season_number: Option<i32>,
+    pub episode_number: Option<i32>,
+    pub identification_source: String,
+    pub needs_review: bool,
+    pub review_reason: Option<String>,
+    pub manual_classification: bool,
+    pub manual_metadata: bool,
+    pub metadata_status: String,
+    pub metadata_source_url: Option<String>,
+    pub metadata_imported_at: Option<String>,
+    pub metadata_candidates: Vec<MediaMetadataCandidate>,
+    pub poster_file: Option<String>,
+    pub backdrop_file: Option<String>,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanProgress {
