@@ -53,7 +53,7 @@ export function App(){
 
   return <div className="remote-shell">
     <header className="app-header"><Brand/><ConnectionPill state={remote.connection}/></header>
-    {remote.error&&<div className="inline-error"><WifiOff/><span>{remote.error}</span><button onClick={()=>remote.setError(null)}><X/></button></div>}
+    {remote.error&&<div className="inline-error" role="status" aria-live="polite"><WifiOff aria-hidden="true"/><span>{remote.error}</span><button onClick={()=>remote.setError(null)} aria-label="Cerrar aviso"><X aria-hidden="true"/></button></div>}
     <main>
       {view==='home'?<>
         <NowPlaying player={player} send={remote.send} openSheet={setSheet} openImage={openImage}/>
@@ -98,27 +98,27 @@ function useLiveRange(remote:number,commit:(value:number)=>void){
   return {value:local??remote,change,release};
 }
 
-function NowPlaying({player,send,openSheet,openImage}:{player:ReturnType<typeof useRemote>['player'];send:ReturnType<typeof useRemote>['send'];openSheet:(sheet:'image'|'audio'|'subtitle')=>void;openImage:()=>void}){
-  /* Los dos controles se preparan antes de cualquier salida temprana: el panel pasa de apagado a
-     encendido en cuanto llega la primera foto del reproductor, y si los hooks se saltearan en ese
-     paso React perdería el orden justo cuando se abre el control remoto. */
+export function NowPlaying({player,send,openSheet,openImage}:{player:ReturnType<typeof useRemote>['player'];send:ReturnType<typeof useRemote>['send'];openSheet:(sheet:'image'|'audio'|'subtitle')=>void;openImage:()=>void}){
   const position=useLiveRange(Math.min(player.positionSeconds,player.durationSeconds||0),seconds=>send({type:'player_seek_to',seconds}));
   const volume=useLiveRange(player.muted?0:player.volume,value=>send({type:'player_set_volume',volume:value}));
-  if(!player.active)return <section className="now-playing empty"><span className="eyebrow">REPRODUCTOR</span><div><Film/><h1>No hay nada reproduciéndose</h1><p>Elegí una película o serie desde el teléfono para verla en la computadora.</p></div></section>;
+  const active=player.active;
+  const subtitleAvailable=active&&player.subtitleTracks.length>0;
+  const audioAvailable=active&&player.audioTracks.length>0;
+  const imageAvailable=active&&player.imageSettings.length>0;
   const percent=player.durationSeconds?player.positionSeconds/player.durationSeconds*100:0;
-  return <section className="now-playing">
-    <span className="eyebrow">REPRODUCIENDO AHORA</span>
-    <div className="title-line"><div><h1>{player.title}</h1><p>{[player.year,player.quality].filter(Boolean).join(' · ')}</p></div></div>
-    {player.nextUp&&<div className="remote-next-up"><div><span>{player.nextUp.label}</span><b>{player.nextUp.title}</b><small>{player.nextUp.position?`${player.nextUp.position} · `:''}Empieza al terminar · {Math.ceil(player.nextUp.secondsRemaining)} s</small></div><div><button className="primary" onClick={()=>send({type:'player_start_next_up'})}><Play fill="currentColor"/>Reproducir ahora</button><button onClick={()=>send({type:'player_cancel_next_up'})}><X/>Cancelar</button></div></div>}
-    <label className="progress"><span>{formatTime(player.positionSeconds)}</span><input aria-label="Posición" type="range" min={0} max={Math.max(player.durationSeconds,1)} step={1} value={position.value} onChange={event=>position.change(Number(event.target.value))} onPointerUp={position.release} onPointerCancel={position.release} onTouchEnd={position.release} onBlur={position.release}/><span>{formatTime(player.durationSeconds)}</span><i style={{width:`${percent}%`}}/></label>
-    <div className="transport"><button onClick={()=>send({type:'player_seek_by',seconds:-10})}><SkipBack/><small>10</small></button><button className="play" onClick={()=>send({type:'player_toggle'})}>{player.playing?<Pause fill="currentColor"/>:<Play fill="currentColor"/>}</button><button onClick={()=>send({type:'player_seek_by',seconds:10})}><SkipForward/><small>10</small></button></div>
-    <div className="volume"><button onClick={()=>send({type:'player_toggle_mute'})}>{player.muted?<VolumeX/>:<Volume2/>}</button><input aria-label="Volumen" type="range" min={0} max={1} step={0.01} value={volume.value} onChange={event=>volume.change(Number(event.target.value))} onPointerUp={volume.release} onPointerCancel={volume.release} onTouchEnd={volume.release} onBlur={volume.release}/><span>{Math.round(volume.value*100)}</span></div>
+  return <section className={`now-playing ${active?'active':'empty'}`} aria-label="Control del reproductor">
+    <span className="eyebrow">{active?'REPRODUCIENDO AHORA':'REPRODUCTOR'}</span>
+    <div className="title-line"><div>{active?<><h1>{player.title}</h1><p>{[player.year,player.quality].filter(Boolean).join(' · ')}</p></>:<><h1>Esperando reproducción</h1><p>Los controles se activan al abrir una película en la computadora.</p></>}</div></div>
+    <label className="progress"><span>{formatTime(active?player.positionSeconds:0)}</span><input aria-label="Posición" disabled={!active} type="range" min={0} max={Math.max(player.durationSeconds,1)} step={1} value={active?position.value:0} onChange={event=>position.change(Number(event.target.value))} onPointerUp={position.release} onPointerCancel={position.release} onTouchEnd={position.release} onBlur={position.release}/><span>{formatTime(active?player.durationSeconds:0)}</span><i style={{width:`${active?percent:0}%`}}/></label>
+    <div className="transport"><button disabled={!active} aria-label="Retroceder 10 segundos" onClick={()=>send({type:'player_seek_by',seconds:-10})}><SkipBack aria-hidden="true"/><small>10</small></button><button disabled={!active} className="play" aria-label={player.playing?'Pausar':'Reproducir'} onClick={()=>send({type:'player_toggle'})}>{player.playing?<Pause fill="currentColor" aria-hidden="true"/>:<Play fill="currentColor" aria-hidden="true"/>}</button><button disabled={!active} aria-label="Avanzar 10 segundos" onClick={()=>send({type:'player_seek_by',seconds:10})}><SkipForward aria-hidden="true"/><small>10</small></button></div>
+    <div className="volume"><button disabled={!active} aria-label={player.muted?'Activar sonido':'Silenciar'} onClick={()=>send({type:'player_toggle_mute'})}>{player.muted?<VolumeX aria-hidden="true"/>:<Volume2 aria-hidden="true"/>}</button><input aria-label="Volumen" disabled={!active} type="range" min={0} max={1} step={0.01} value={active?volume.value:0.8} onChange={event=>volume.change(Number(event.target.value))} onPointerUp={volume.release} onPointerCancel={volume.release} onTouchEnd={volume.release} onBlur={volume.release}/><span>{Math.round((active?volume.value:0.8)*100)}</span></div>
     <div className="quick-controls">
-      {player.subtitleTracks.length>0&&<button onClick={()=>openSheet('subtitle')}><span>CC</span>Subtítulos</button>}
-      {player.audioTracks.length>0&&<button onClick={()=>openSheet('audio')}><Volume2/>Audio</button>}
-      {player.imageSettings.length>0&&<button onClick={openImage}><ImageIcon/>Imagen</button>}
-      <button onClick={()=>send({type:'player_toggle_fullscreen'})}><Expand/>Pantalla</button>
+      <button className={subtitleAvailable?'':'control-placeholder'} disabled={!subtitleAvailable} aria-hidden={!subtitleAvailable} tabIndex={subtitleAvailable?0:-1} onClick={()=>openSheet('subtitle')}><span>CC</span>Subtítulos</button>
+      <button className={audioAvailable?'':'control-placeholder'} disabled={!audioAvailable} aria-hidden={!audioAvailable} tabIndex={audioAvailable?0:-1} onClick={()=>openSheet('audio')}><Volume2 aria-hidden="true"/>Audio</button>
+      <button className={imageAvailable?'':'control-placeholder'} disabled={!imageAvailable} aria-hidden={!imageAvailable} tabIndex={imageAvailable?0:-1} onClick={openImage}><ImageIcon aria-hidden="true"/>Imagen</button>
+      <button disabled={!active} onClick={()=>send({type:'player_toggle_fullscreen'})}><Expand aria-hidden="true"/>Pantalla</button>
     </div>
+    {player.nextUp&&<div className="remote-next-up"><div><span>{player.nextUp.label}</span><b>{player.nextUp.title}</b><small>{player.nextUp.position?`${player.nextUp.position} · `:''}Empieza al terminar · {Math.ceil(player.nextUp.secondsRemaining)} s</small></div><div><button className="primary" onClick={()=>send({type:'player_start_next_up'})}><Play fill="currentColor" aria-hidden="true"/>Reproducir ahora</button><button onClick={()=>send({type:'player_cancel_next_up'})}><X aria-hidden="true"/>Cancelar</button></div></div>}
   </section>;
 }
 

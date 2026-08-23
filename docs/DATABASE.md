@@ -40,3 +40,22 @@ order — the account's own shelves first, then science fiction, sagas and the m
 with every series on one shelf just above the repair queue, which stays last —
 and land after the saved ones, so a genre arriving with a later scan never disturbs a hand-made
 arrangement.
+
+## Credited people and their photos
+
+Each title stores its direction, writing and billed cast in `people_json` on `media_items`. The
+cast is capped at ten because the provider answers ordered by billing and the tail is unbounded:
+nine names for `Alien`, a hundred and three for `Avengers: Endgame`. Only Director, Screenplay,
+Writer and Story are taken from the crew; the rest of a film's credits carry no photo and no
+meaning outside the industry.
+
+Photos are cached under `<cache>/tmdb/profiles/` named after the provider file, so one actor is
+stored once no matter how many titles credit them. The portable package instead copies each photo
+into `.cinewana/items/<portable_id>/cast/`, duplicating a face across every movie that credits it
+— deliberately, because each folder has to stand on its own for the library to show faces on a
+computer that never saw this metadata. At about ten kilobytes per photo, a full library of two
+hundred and seventy titles spends roughly thirty-three megabytes on the whole cast.
+
+Titles imported before this existed keep an empty list and fall back to the plain name list in
+`cast_json`. The bulk refresh in Configuración fetches every sheet again, one title at a time to
+stay within the provider's rate limits, and can be cancelled without losing what it already did.

@@ -1,5 +1,5 @@
 import { mockConvertFileSrc, mockIPC, mockWindows } from '@tauri-apps/api/mocks';
-import type { Bootstrap, CategoryOption, CategoryPreference, CategoryRow, CategoryStyle, CustomCategory, HomeDto, ImageAnalysis, MediaDetail, MediaSummary, SagaSummary, ScanProgress, SeriesSummary } from './types';
+import type { Bootstrap, CategoryOption, CategoryPreference, CategoryRow, CategoryStyle, CustomCategory, HomeDto, MediaPerson, ImageAnalysis, MediaDetail, MediaSummary, SagaSummary, ScanProgress, SeriesSummary } from './types';
 
 const now = new Date().toISOString();
 const scan: ScanProgress = { running:false, cancelRequested:false, found:16, processed:16, skipped:0, errors:0, percent:100 };
@@ -134,6 +134,7 @@ function buildCategories(preferences:CategoryPreference[]): { categories:Categor
 
 let preferences:CategoryPreference[] = [];
 let categoryStyle:CategoryStyle = 'gold';
+let carouselDrag = false;
 let customCategories:CustomCategory[] = [{ id:'custom:demo', label:'Para ver con Rox', items:['movie-matrix','movie-deadpool'], series:[] }];
 
 const buildHome = (): HomeDto => ({
@@ -144,9 +145,23 @@ const buildHome = (): HomeDto => ({
   series,
   favorites:[],
   categoryStyle,
+  carouselDrag,
   customCategories,
   ...buildCategories(preferences)
 });
+
+/* Sin fotos reales: el mock corre en el navegador y no toca el cache de Windows, asi que las
+   caritas se dibujan con iniciales, que es el mismo camino que sigue una persona sin foto. */
+const samplePeople: MediaPerson[] = [
+  { name:'Ridley Scott', role:'director' },
+  { name:'Dan O’Bannon', role:'writer' },
+  { name:'Sigourney Weaver', role:'actor', character:'Ripley' },
+  { name:'Tom Skerritt', role:'actor', character:'Dallas' },
+  { name:'John Hurt', role:'actor', character:'Kane' },
+  { name:'Veronica Cartwright', role:'actor', character:'Lambert' },
+  { name:'Harry Dean Stanton', role:'actor', character:'Brett' },
+  { name:'Yaphet Kotto', role:'actor', character:'Parker' }
+];
 
 const catalog = [...movies,...episodes];
 const detailFor = (item:MediaSummary): MediaDetail => ({
@@ -162,7 +177,8 @@ const detailFor = (item:MediaSummary): MediaDetail => ({
   metadataSourceUrl:null,
   metadataImportedAt:null,
   metadataCandidates:[],
-  recommendations:movies.slice(1,4)
+  recommendations:movies.slice(1,4),
+  people:item.incomplete?[]:samplePeople
 });
 
 const boot = (): Bootstrap => ({
@@ -197,6 +213,9 @@ export function installDevTauriMock() {
         return catalog;
       case 'set_category_order':
         preferences = (args as { preferences?: CategoryPreference[] }).preferences || [];
+        return buildHome();
+      case 'set_carousel_drag':
+        carouselDrag = Boolean((args as { enabled?: boolean }).enabled);
         return buildHome();
       case 'set_category_style':
         categoryStyle = (args as { style?: CategoryStyle }).style || 'gold';

@@ -129,7 +129,50 @@ pub struct MediaDetail {
     pub metadata_imported_at: Option<String>,
     pub metadata_candidates: Vec<MediaMetadataCandidate>,
     pub recommendations: Vec<MediaSummary>,
+    /// Direction, writing and cast, in that order, each with its photo when the provider has one.
+    #[serde(default)]
+    pub people: Vec<MediaPerson>,
 }
+
+/// What a person did in a title.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonRole {
+    Director,
+    Writer,
+    Actor,
+}
+
+/// One person credited on a title, with the photo that travels beside the video.
+///
+/// The same shape serves the three stages of the trip: the importer fills `photo_source` with the
+/// provider URL, the cache fills `photo_url` with the local path the interface renders, and the
+/// portable package fills `photo_file` with the name of the copy stored next to the movie.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaPerson {
+    pub name: String,
+    pub role: PersonRole,
+    /// Character played, only for actors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character: Option<String>,
+    /// Absolute path of the cached photo; the interface turns it into an asset URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub photo_url: Option<String>,
+    /// Name of the photo inside the portable `cast` folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub photo_file: Option<String>,
+    /// Provider URL, kept so a missing photo can be downloaded again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub photo_source: Option<String>,
+}
+
+/// How many actors are kept per title.
+///
+/// The provider answers ordered by billing, and the tail grows without limit: 9 names for `Alien`,
+/// 103 for `Avengers: Endgame`. Ten covers the people an audience recognizes and keeps the sheet
+/// readable on every title.
+pub const MAX_CAST: usize = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -175,6 +218,9 @@ pub struct ImportedMediaMetadata {
     pub collection_id: Option<String>,
     #[serde(default)]
     pub collection_name: Option<String>,
+    /// Credited people carrying the provider URL of each photo.
+    #[serde(default)]
+    pub people: Vec<MediaPerson>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -212,6 +258,9 @@ pub struct PortableMediaMetadata {
     pub saga_title: Option<String>,
     #[serde(default)]
     pub saga_position: Option<i32>,
+    /// Credited people whose photos live in the `cast` folder beside this metadata file.
+    #[serde(default)]
+    pub people: Vec<MediaPerson>,
     pub updated_at: String,
 }
 
@@ -275,6 +324,10 @@ pub struct HomeDto {
     /// Shelves the account created, with their membership, for the assignment controls.
     #[serde(default)]
     pub custom_categories: Vec<CustomCategory>,
+    /// Whether a shelf can be dragged sideways with the pointer. Off by default: the grab cursor
+    /// sits on top of every poster and gets in the way of simply opening a title.
+    #[serde(default)]
+    pub carousel_drag: bool,
 }
 
 /// The two looks available for the category strip.

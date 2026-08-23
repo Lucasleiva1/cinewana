@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use cinewana_core::PortableMediaMetadata;
+use cinewana_core::{MediaPerson, PortableMediaMetadata};
 use cinewana_database::Database;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -13,6 +13,7 @@ const DIRECTORY_NAME: &str = ".cinewana";
 const ITEMS_DIRECTORY: &str = "items";
 const METADATA_FILE: &str = "metadata.json";
 const INDEX_FILE: &str = "index.json";
+const CAST_DIRECTORY: &str = "cast";
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +46,7 @@ pub fn sync_media(db: &Database, media_id: &str) -> Result<()> {
         copy_artwork(entry.poster_path.as_deref(), &item_directory, "poster")?;
     entry.metadata.backdrop_file =
         copy_artwork(entry.backdrop_path.as_deref(), &item_directory, "backdrop")?;
+    copy_people_photos(&mut entry.metadata.people, &item_directory)?;
     let metadata_path = item_directory.join(METADATA_FILE);
     write_json_atomic(&metadata_path, &entry.metadata)?;
     update_index(folder, &entry.metadata.video_file_name, &portable_id)?;
@@ -79,6 +81,8 @@ pub fn restore_media(
         &metadata.portable_id,
         "backdrops",
     )?;
+    let mut metadata = metadata;
+    restore_people_photos(&mut metadata.people, item_directory, cache_dir)?;
     db.apply_portable_metadata(
         media_id,
         &metadata,
@@ -181,6 +185,71 @@ fn update_index(folder: &Path, video_file_name: &str, portable_id: &str) -> Resu
         .entries
         .insert(video_file_name.to_lowercase(), portable_id.to_owned());
     write_json_atomic(&path, &index)
+}
+
+/// Copies every credited photo next to the video, inside the item's own `cast` folder.
+///
+/// The same actor is duplicated across the movies that credit them, on purpose: each folder has to
+/// stand on its own so the library still shows faces after the drive is plugged into a computer
+/// that never saw this metadata.
+fn copy_people_photos(people: &mut [MediaPerson], item_directory: &Path) -> Result<()> {
+    if people.is_empty() {
+        return Ok(());
+    }
+    let cast_directory = item_directory.join(CAST_DIRECTORY);
+    fs::create_dir_all(&cast_directory)
+        .with_context(|| format!("create portable cast folder {}", cast_directory.display()))?;
+    for person in people.iter_mut() {
+        let Some(source) = person.photo_url.as_deref().map(Path::new) else {
+            continue;
+        };
+        let Some(file_name) = source.file_name().map(|name| name.to_string_lossy().into_owned())
+        else {
+            continue;
+        };
+        let destination = cast_directory.join(&file_name);
+        if !destination_is_current(source, &destination) {
+            if let Err(error) = fs::copy(source, &destination) {
+                /* Una foto que falta no puede romper el guardado del resto de la ficha. */
+                eprintln!("no se pudo copiar la foto {}: {error}", source.display());
+                continue;
+            }
+        }
+        person.photo_file = Some(file_name);
+    }
+    Ok(())
+}
+
+/// Brings the photos stored beside the video into the local cache and points the people at them.
+fn restore_people_photos(
+    people: &mut [MediaPerson],
+    item_directory: &Path,
+    cache_dir: &Path,
+) -> Result<()> {
+    if people.is_empty() {
+        return Ok(());
+    }
+    let cast_directory = item_directory.join(CAST_DIRECTORY);
+    let target_directory = cache_dir.join("tmdb").join("profiles");
+    fs::create_dir_all(&target_directory)?;
+    for person in people.iter_mut() {
+        let Some(file_name) = person.photo_file.clone() else {
+            continue;
+        };
+        let source = cast_directory.join(&file_name);
+        if !source.is_file() {
+            person.photo_url = None;
+            continue;
+        }
+        let destination = target_directory.join(&file_name);
+        if !destination_is_current(&source, &destination) {
+            fs::copy(&source, &destination).with_context(|| {
+                format!("copy portable cast photo {}", source.display())
+            })?;
+        }
+        person.photo_url = Some(destination.to_string_lossy().into_owned());
+    }
+    Ok(())
 }
 
 fn copy_artwork(source: Option<&str>, item_directory: &Path, stem: &str) -> Result<Option<String>> {
@@ -298,6 +367,51 @@ mod tests {
     use super::*;
     use cinewana_core::{MediaKind, MediaMetadataCandidate};
 
+    /// The whole point of storing faces beside the video: another computer, with an empty cache,
+    /// still shows the cast after reading the folder.
+    #[test]
+    fn cast_photos_travel_with_the_movie() {
+        let root = std::env::temp_dir().join(format!("cinewana-cast-{}", Uuid::new_v4()));
+        let item = root.join("origen").join(DIRECTORY_NAME).join(ITEMS_DIRECTORY).join("movie-1");
+        let source_cache = root.join("cache-vieja").join("tmdb").join("profiles");
+        fs::create_dir_all(&item).unwrap();
+        fs::create_dir_all(&source_cache).unwrap();
+        let photo = source_cache.join("ripley.jpg");
+        fs::write(&photo, b"foto-de-prueba").unwrap();
+
+        let mut people = vec![MediaPerson {
+            name: "Sigourney Weaver".into(),
+            role: cinewana_core::PersonRole::Actor,
+            character: Some("Ripley".into()),
+            photo_url: Some(photo.to_string_lossy().into_owned()),
+            photo_file: None,
+            photo_source: None,
+        }];
+        copy_people_photos(&mut people, &item).unwrap();
+        assert_eq!(people[0].photo_file.as_deref(), Some("ripley.jpg"));
+        assert!(
+            item.join(CAST_DIRECTORY).join("ripley.jpg").is_file(),
+            "la foto tiene que quedar al lado de la pelicula"
+        );
+
+        // Otra computadora: cache vacio, solo la carpeta que vino en el disco.
+        let new_cache = root.join("cache-nueva");
+        people[0].photo_url = None;
+        restore_people_photos(&mut people, &item, &new_cache).unwrap();
+        let restored = people[0].photo_url.clone().expect("la foto no se restauro");
+        assert!(Path::new(&restored).is_file());
+        assert_eq!(fs::read(&restored).unwrap(), b"foto-de-prueba");
+
+        // Una foto borrada no puede dejar una ruta rota apuntando a la nada.
+        fs::remove_file(item.join(CAST_DIRECTORY).join("ripley.jpg")).unwrap();
+        let mut faltante = people.clone();
+        restore_people_photos(&mut faltante, &item, &root.join("cache-tercera")).unwrap();
+        assert!(faltante[0].photo_url.is_none());
+        assert_eq!(faltante[0].name, "Sigourney Weaver", "el nombre sobrevive sin foto");
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn portable_metadata_can_be_found_by_video_name_and_size() {
         let root = std::env::temp_dir().join(format!("cinewana-portable-{}", Uuid::new_v4()));
@@ -347,6 +461,14 @@ mod tests {
             metadata_candidates: Vec::<MediaMetadataCandidate>::new(),
             poster_file: Some("poster.jpg".into()),
             backdrop_file: None,
+            people: vec![MediaPerson {
+                name: "Sigourney Weaver".into(),
+                role: cinewana_core::PersonRole::Actor,
+                character: Some("Ripley".into()),
+                photo_url: None,
+                photo_file: Some("ripley.jpg".into()),
+                photo_source: None,
+            }],
             saga_id: Some("tmdb:8091".into()),
             saga_title: Some("Colección Alien".into()),
             saga_position: Some(1),

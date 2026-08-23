@@ -1,6 +1,8 @@
 use super::MetadataSearchOutcome;
 use anyhow::{Context, Result};
-use cinewana_core::{ImportedMediaMetadata, MediaKind, MediaMetadataCandidate};
+use cinewana_core::{
+    ImportedMediaMetadata, MAX_CAST, MediaKind, MediaMetadataCandidate, MediaPerson, PersonRole,
+};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -9,6 +11,11 @@ use std::path::{Path, PathBuf};
 
 const API_BASE: &str = "https://api.themoviedb.org/3";
 const IMAGE_BASE: &str = "https://image.tmdb.org/t/p";
+const PROFILE_SIZE: &str = "w185";
+/// Below this a poster or backdrop is a placeholder rather than real artwork.
+const MIN_ARTWORK_BYTES: u64 = 4_000;
+/// Cast headshots are far smaller, and a legitimate one can weigh under a kilobyte.
+const MIN_PROFILE_BYTES: u64 = 512;
 const SOURCE_BASE: &str = "https://www.themoviedb.org";
 const PRIMARY_LANGUAGE: &str = "es-AR";
 const FALLBACK_LANGUAGE: &str = "en-US";
@@ -24,6 +31,8 @@ enum Credential {
 pub struct CachedArtwork {
     pub poster_path: Option<PathBuf>,
     pub backdrop_path: Option<PathBuf>,
+    /// Credited people already pointing at their cached photo.
+    pub people: Vec<MediaPerson>,
 }
 
 pub struct TmdbMetadataClient {
@@ -56,6 +65,34 @@ impl TmdbMetadataClient {
 
     pub fn configured(&self) -> bool {
         !matches!(self.credential, Credential::Missing)
+    }
+
+    /// Reimports a title whose provider page is already known, skipping the search entirely.
+    ///
+    /// Searching by name a title that was already identified is how a resolved movie turns
+    /// ambiguous again: `Deadpool & Wolverine` matches several entries by text, but its stored page
+    /// points at exactly one. When the identity is known, ask for it directly.
+    pub async fn import_from_source(
+        &self,
+        source_url: &str,
+        season_number: Option<i32>,
+        episode_number: Option<i32>,
+    ) -> Result<ImportedMediaMetadata> {
+        self.require_credential()?;
+        let segments = source_url.split('/').collect::<Vec<_>>();
+        let Some((kind, tmdb_id)) = segments.windows(2).find_map(|pair| match pair {
+            [kind, id] if *kind == "movie" || *kind == "tv" => {
+                id.parse::<i64>().ok().map(|id| (*kind, id))
+            }
+            _ => None,
+        }) else {
+            anyhow::bail!("la dirección guardada no tiene un identificador de TMDB");
+        };
+        if kind == "movie" {
+            self.import_movie(tmdb_id).await
+        } else {
+            self.import_tv(tmdb_id, season_number, episode_number).await
+        }
     }
 
     pub async fn search_media(
@@ -217,7 +254,52 @@ impl TmdbMetadataClient {
         Ok(CachedArtwork {
             poster_path: poster_result?,
             backdrop_path: backdrop_result?,
+            people: self.cache_people(cache_root, &metadata.people).await?,
         })
+    }
+
+    /// Downloads the photo of every credited person and returns them pointing at the local copy.
+    ///
+    /// Photos are named after the provider file, so the same actor appearing in twenty movies is
+    /// stored once in the cache. The copy that travels beside each video is made later, by the
+    /// portable package, where duplication is the point.
+    pub async fn cache_people(
+        &self,
+        cache_root: &Path,
+        people: &[MediaPerson],
+    ) -> Result<Vec<MediaPerson>> {
+        if people.is_empty() {
+            return Ok(Vec::new());
+        }
+        let directory = cache_root.join("tmdb").join("profiles");
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .context("create persistent TMDB profile cache")?;
+        let mut cached = Vec::with_capacity(people.len());
+        for person in people {
+            let mut person = person.clone();
+            if let Some(source) = person.photo_source.clone() {
+                let file_name = profile_file_name(&source);
+                let target = directory.join(&file_name);
+                /* Una cara que no se puede bajar deja a la persona sin foto, nunca sin ficha: el
+                   nombre sigue estando y la interfaz dibuja las iniciales. */
+                match self
+                    .download_image_above(Some(&source), &target, MIN_PROFILE_BYTES)
+                    .await
+                {
+                    Ok(Some(path)) => {
+                        person.photo_url = Some(path.to_string_lossy().into_owned());
+                        person.photo_file = Some(file_name);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        eprintln!("no se pudo bajar la foto de {}: {error}", person.name);
+                    }
+                }
+            }
+            cached.push(person);
+        }
+        Ok(cached)
     }
 
     async fn import_movie(&self, tmdb_id: i64) -> Result<ImportedMediaMetadata> {
@@ -232,6 +314,7 @@ impl TmdbMetadataClient {
                 .as_ref()
                 .and_then(|detail| non_empty(detail.overview.clone()))
         });
+        let people = people_from_credits(primary.credits.as_ref());
         Ok(ImportedMediaMetadata {
             provider: "tmdb".to_owned(),
             title: primary.title.unwrap_or_else(|| "Sin título".to_owned()),
@@ -251,6 +334,7 @@ impl TmdbMetadataClient {
                 .belongs_to_collection
                 .as_ref()
                 .and_then(|collection| non_empty(collection.name.clone())),
+            people,
         })
     }
 
@@ -268,6 +352,9 @@ impl TmdbMetadataClient {
         let mut year = year_from_date(series.first_air_date.as_deref());
         let mut overview = non_empty(series.overview.clone());
         let mut cast = cast_names(series.aggregate_credits.clone());
+        /* La ficha de la serie trae el reparto de todas las temporadas juntas; la del capitulo
+           trae quien aparecio en ese capitulo. Si el capitulo dice algo, gana. */
+        let mut people = people_from_credits(series.aggregate_credits.as_ref());
         let mut backdrop_path = series.backdrop_path.clone();
         let mut source_url = format!("{SOURCE_BASE}/tv/{tmdb_id}");
         if let (Some(season), Some(episode)) = (season_number, episode_number) {
@@ -279,6 +366,10 @@ impl TmdbMetadataClient {
             }
             year = year_from_date(details.air_date.as_deref()).or(year);
             overview = non_empty(details.overview).or(overview);
+            let episode_people = people_from_credits(details.credits.as_ref());
+            if !episode_people.is_empty() {
+                people = episode_people;
+            }
             let episode_cast = cast_names(details.credits);
             if !episode_cast.is_empty() {
                 cast = episode_cast;
@@ -305,6 +396,7 @@ impl TmdbMetadataClient {
             backdrop_url: image_url("w1280", backdrop_path.as_deref()),
             collection_id: None,
             collection_name: None,
+            people,
         })
     }
 
@@ -375,12 +467,27 @@ impl TmdbMetadataClient {
     }
 
     async fn download_image(&self, source: Option<&str>, target: &Path) -> Result<Option<PathBuf>> {
+        self.download_image_above(source, target, MIN_ARTWORK_BYTES)
+            .await
+    }
+
+    /// Downloads an image, rejecting anything below `minimum` bytes as a broken file.
+    ///
+    /// Posters and backdrops are large by nature, so a tiny answer means the provider served a
+    /// placeholder. Cast photos are small headshots and a legitimate one can weigh under a
+    /// kilobyte, which is why they carry their own floor.
+    async fn download_image_above(
+        &self,
+        source: Option<&str>,
+        target: &Path,
+        minimum: u64,
+    ) -> Result<Option<PathBuf>> {
         let Some(source) = source else {
             return Ok(None);
         };
         if tokio::fs::metadata(target)
             .await
-            .is_ok_and(|metadata| metadata.len() > 4_000)
+            .is_ok_and(|metadata| metadata.len() >= minimum)
         {
             return Ok(Some(target.to_path_buf()));
         }
@@ -394,7 +501,7 @@ impl TmdbMetadataClient {
             anyhow::bail!("TMDB image server responded with {}", response.status());
         }
         let bytes = response.bytes().await.context("read TMDB artwork")?;
-        if bytes.len() < 4_000 {
+        if (bytes.len() as u64) < minimum {
             anyhow::bail!("TMDB returned an invalid artwork file");
         }
         tokio::fs::write(target, bytes)
@@ -566,6 +673,25 @@ fn image_url(size: &str, path: Option<&str>) -> Option<String> {
         .map(|value| format!("{IMAGE_BASE}/{size}{value}"))
 }
 
+/// Names a cached photo after the provider file, so one actor is stored once no matter how many
+/// titles credit them.
+fn profile_file_name(source_url: &str) -> String {
+    let key = source_url
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.split('.').next())
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .take(64)
+        .collect::<String>();
+    if key.is_empty() {
+        "persona.jpg".to_owned()
+    } else {
+        format!("{key}.jpg")
+    }
+}
+
 fn artwork_cache_key(source_url: Option<&str>, fingerprint: &str) -> String {
     let source_key = source_url
         .and_then(|url| url.rsplit('/').next())
@@ -591,6 +717,76 @@ fn year_from_date(value: Option<&str>) -> Option<i32> {
     value
         .and_then(|date| date.get(0..4))
         .and_then(|year| year.parse().ok())
+}
+
+/// Builds the credited people: direction first, then writing, then the billed cast.
+///
+/// Only jobs an audience looks for are kept. A film lists dozens of crew entries and most of them
+/// carry no photo and no meaning outside the industry.
+fn people_from_credits(credits: Option<&TmdbCredits>) -> Vec<MediaPerson> {
+    let Some(credits) = credits else {
+        return Vec::new();
+    };
+    let mut people: Vec<MediaPerson> = Vec::new();
+    let mut push = |name: &str, role: PersonRole, character: Option<String>, photo: Option<&str>| {
+        let name = name.trim();
+        if name.is_empty()
+            || people
+                .iter()
+                .any(|person| person.name == name && person.role == role)
+        {
+            return;
+        }
+        people.push(MediaPerson {
+            name: name.to_owned(),
+            role,
+            character: character.filter(|value| !value.trim().is_empty()),
+            photo_url: None,
+            photo_file: None,
+            photo_source: image_url(PROFILE_SIZE, photo),
+        });
+    };
+    for member in &credits.crew {
+        if member.job.as_deref() == Some("Director") {
+            push(
+                &member.name,
+                PersonRole::Director,
+                None,
+                member.profile_path.as_deref(),
+            );
+        }
+    }
+    for member in &credits.crew {
+        if matches!(
+            member.job.as_deref(),
+            Some("Screenplay") | Some("Writer") | Some("Story")
+        ) {
+            push(
+                &member.name,
+                PersonRole::Writer,
+                None,
+                member.profile_path.as_deref(),
+            );
+        }
+    }
+    let mut cast = credits.cast.clone();
+    cast.sort_by_key(|person| person.order.unwrap_or(i32::MAX));
+    for member in cast.iter().take(MAX_CAST) {
+        let character = member.character.clone().or_else(|| {
+            member
+                .roles
+                .as_ref()
+                .and_then(|roles| roles.first())
+                .and_then(|role| role.character.clone())
+        });
+        push(
+            &member.name,
+            PersonRole::Actor,
+            character,
+            member.profile_path.as_deref(),
+        );
+    }
+    people
 }
 
 fn cast_names(credits: Option<TmdbCredits>) -> Vec<String> {
@@ -693,12 +889,30 @@ struct TmdbCollection {
 struct TmdbCredits {
     #[serde(default)]
     cast: Vec<TmdbCastMember>,
+    #[serde(default)]
+    crew: Vec<TmdbCrewMember>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct TmdbCastMember {
     name: String,
     order: Option<i32>,
+    character: Option<String>,
+    profile_path: Option<String>,
+    /// Present on series credits, where the same actor is listed once for many episodes.
+    roles: Option<Vec<TmdbAggregateRole>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TmdbAggregateRole {
+    character: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TmdbCrewMember {
+    name: String,
+    job: Option<String>,
+    profile_path: Option<String>,
 }
 
 #[cfg(test)]

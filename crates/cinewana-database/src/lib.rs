@@ -5,8 +5,8 @@ use cinewana_core::{
     ClassificationUpdate, HomeDto, IdentificationReview, ImportedMediaMetadata, LibraryRootDto,
     MediaDetail, MediaKind, MediaMetadataCandidate, MediaMetadataUpdate, MediaSummary,
     ALL_SERIES_ID, ALL_SERIES_LABEL, CATEGORY_STYLES, CUSTOM_PREFIX, CustomCategory,
-    DEFAULT_CATEGORY_STYLE, MediaTechnical, MediaTrack, ParsedMediaName, PortableMediaMetadata,
-    RootStatus, SagaSummary, SeriesSeasonSummary, SeriesSummary,
+    DEFAULT_CATEGORY_STYLE, MediaPerson, MediaTechnical, MediaTrack, ParsedMediaName,
+    PortableMediaMetadata, RootStatus, SagaSummary, SeriesSeasonSummary, SeriesSummary,
     genres::{
         SAGAS_ID, SAGAS_LABEL, SERIES_PREFIX, UNCATEGORIZED_ID, UNCATEGORIZED_LABEL,
         canonical_genres,
@@ -266,6 +266,7 @@ impl Database {
         self.ensure_media_column("saga_id", "TEXT", 15)?;
         self.ensure_media_column("saga_title", "TEXT", 16)?;
         self.ensure_media_column("saga_position", "INTEGER", 17)?;
+        self.ensure_media_column("people_json", "TEXT NOT NULL DEFAULT '[]'", 18)?;
         self.connection.lock().execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_media_portable_id ON media_items(portable_id) WHERE portable_id IS NOT NULL",
             [],
@@ -1013,7 +1014,7 @@ impl Database {
                         m.review_reason,m.manual_classification,m.manual_metadata,m.metadata_status,
                         m.metadata_source_url,m.metadata_imported_at,m.metadata_candidates_json,
                         m.poster_cache_key,m.backdrop_cache_key,m.updated_at,
-                        m.saga_id,m.saga_title,m.saga_position
+                        m.saga_id,m.saga_title,m.saga_position,m.people_json
                  FROM media_items m JOIN media_files f ON f.media_item_id=m.id
                  WHERE m.id=?1 AND f.offline=0 LIMIT 1",
                 [media_id],
@@ -1057,6 +1058,8 @@ impl Database {
                             saga_id: row.get(26)?,
                             saga_title: row.get(27)?,
                             saga_position: row.get(28)?,
+                            people: serde_json::from_str(&row.get::<_, String>(29)?)
+                                .unwrap_or_default(),
                             updated_at: row.get(25)?,
                         },
                         video_path: row.get(1)?,
@@ -1108,7 +1111,8 @@ impl Database {
              metadata_candidates_json=?19,metadata_json_path=?20,
              poster_cache_key=COALESCE(?21,poster_cache_key),
              backdrop_cache_key=COALESCE(?22,backdrop_cache_key),updated_at=?23,
-             saga_id=?25,saga_title=?26,saga_position=?27
+             saga_id=?25,saga_title=?26,saga_position=?27,
+             people_json=CASE WHEN ?28<>'[]' THEN ?28 ELSE people_json END
              WHERE id=?24",
             params![
                 metadata.portable_id,
@@ -1137,7 +1141,8 @@ impl Database {
                 media_id,
                 metadata.saga_id,
                 metadata.saga_title,
-                metadata.saga_position
+                metadata.saga_position,
+                serde_json::to_string(&metadata.people)?
             ],
         )?;
         transaction.execute("DELETE FROM episodes WHERE media_item_id=?1", [media_id])?;
@@ -1264,6 +1269,7 @@ impl Database {
             build_categories(&movies, &series, &sagas, &preferences, &custom);
         Ok(HomeDto {
             category_style: self.category_style(account_id)?,
+            carousel_drag: self.carousel_drag(account_id)?,
             custom_categories: custom,
             heroes,
             continue_watching,
@@ -1296,6 +1302,7 @@ impl Database {
             metadata_source_url,
             metadata_imported_at,
             metadata_candidates_json,
+            people_json,
         ): (
             Option<String>,
             String,
@@ -1307,8 +1314,9 @@ impl Database {
             Option<String>,
             Option<String>,
             String,
+            String,
         ) = conn.query_row(
-            "SELECT m.overview,m.genres_json,m.cast_json,COALESCE(m.runtime_ms,f.duration_ms),f.file_name,m.manual_metadata,m.metadata_status,m.metadata_source_url,m.metadata_imported_at,m.metadata_candidates_json FROM media_items m JOIN media_files f ON f.media_item_id=m.id WHERE m.id=?1",
+            "SELECT m.overview,m.genres_json,m.cast_json,COALESCE(m.runtime_ms,f.duration_ms),f.file_name,m.manual_metadata,m.metadata_status,m.metadata_source_url,m.metadata_imported_at,m.metadata_candidates_json,m.people_json FROM media_items m JOIN media_files f ON f.media_item_id=m.id WHERE m.id=?1",
             [id],
             |r| {
                 Ok((
@@ -1322,6 +1330,7 @@ impl Database {
                     r.get(7)?,
                     r.get(8)?,
                     r.get(9)?,
+                    r.get(10)?,
                 ))
             },
         )?;
@@ -1358,6 +1367,7 @@ impl Database {
             metadata_imported_at,
             metadata_candidates: serde_json::from_str(&metadata_candidates_json)
                 .unwrap_or_default(),
+            people: serde_json::from_str(&people_json).unwrap_or_default(),
         }))
     }
 
@@ -1504,6 +1514,55 @@ impl Database {
         Ok(())
     }
 
+    /// Lists every online title so their sheets can be fetched again in one pass.
+    ///
+    /// Movies come first because they are what the shelves are built from; inside each group the
+    /// order is alphabetical so a long run is easy to follow on screen.
+    pub fn metadata_refresh_targets(&self) -> Result<Vec<MetadataImportTarget>> {
+        let conn = self.connection.lock();
+        let mut statement = conn.prepare(
+            "SELECT m.id,COALESCE(m.series_title,m.title),m.year,m.kind,m.season_number,m.episode_number,f.file_name,f.fingerprint
+             FROM media_items m JOIN media_files f ON f.media_item_id=m.id
+             JOIN library_roots r ON r.id=f.library_root_id
+             WHERE f.offline=0 AND r.enabled=1
+             ORDER BY CASE WHEN m.kind='episode' THEN 1 ELSE 0 END, m.sort_title",
+        )?;
+        statement
+            .query_map([], |row| {
+                let kind: String = row.get(3)?;
+                Ok(MetadataImportTarget {
+                    media_id: row.get(0)?,
+                    title: row.get(1)?,
+                    year: row.get(2)?,
+                    kind: if kind == "episode" {
+                        MediaKind::Episode
+                    } else {
+                        MediaKind::Movie
+                    },
+                    season_number: row.get(4)?,
+                    episode_number: row.get(5)?,
+                    file_name: row.get(6)?,
+                    fingerprint: row.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Provider page already stored for a title, when it was identified before.
+    pub fn metadata_source_url(&self, media_id: &str) -> Result<Option<String>> {
+        self.connection
+            .lock()
+            .query_row(
+                "SELECT metadata_source_url FROM media_items WHERE id=?1",
+                [media_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
+            .map_err(Into::into)
+    }
+
     pub fn metadata_target(&self, media_id: &str) -> Result<Option<MetadataImportTarget>> {
         self.connection
             .lock()
@@ -1539,7 +1598,7 @@ impl Database {
             .connection
             .lock()
             .query_row(
-                "SELECT manual_metadata,metadata_status,metadata_source_url,metadata_checked_at,metadata_candidates_json,metadata_imported_at FROM media_items WHERE id=?1",
+                "SELECT manual_metadata,metadata_status,metadata_source_url,metadata_checked_at,metadata_candidates_json,metadata_imported_at,people_json FROM media_items WHERE id=?1",
                 [media_id],
                 |row| {
                     Ok((
@@ -1549,14 +1608,21 @@ impl Database {
                         row.get::<_, Option<String>>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((manual, status, source_url, _checked_at, candidates_json, imported_at)) = row
+        let Some((manual, status, source_url, _checked_at, candidates_json, imported_at, people_json)) = row
         else {
             return Ok(false);
         };
+        let missing_tmdb_people = status == "imported"
+            && source_url
+                .as_deref()
+                .is_some_and(|url| url.contains("themoviedb.org/"))
+            && serde_json::from_str::<Vec<MediaPerson>>(&people_json)
+                .is_ok_and(|people| people.is_empty());
         let legacy_wikipedia = source_url
             .as_deref()
             .is_some_and(|url| url.contains("wikipedia.org/"));
@@ -1571,11 +1637,12 @@ impl Database {
                 .is_some_and(|imported| {
                     Utc::now().signed_duration_since(imported) >= chrono::Duration::days(180)
                 });
-        Ok(!manual
+        Ok(missing_tmdb_people
+            || (!manual
             && ((legacy_wikipedia && status == "imported")
                 || legacy_candidates
                 || stale_tmdb
-                || (status == "pending" && source_url.is_none())))
+                || (status == "pending" && source_url.is_none()))))
     }
 
     pub fn apply_imported_metadata(
@@ -1586,6 +1653,7 @@ impl Database {
         poster_path: Option<&str>,
         backdrop_path: Option<&str>,
         preserve_title: bool,
+        people: &[MediaPerson],
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let genres = normalize_tags(metadata.genres.clone(), 12);
@@ -1603,6 +1671,7 @@ impl Database {
              metadata_candidates_json='[]',metadata_json_path=?10,
              manual_classification=CASE WHEN ?11=1 THEN 1 ELSE manual_classification END,
              saga_id=COALESCE(?13,saga_id),saga_title=COALESCE(?14,saga_title),
+             people_json=CASE WHEN ?15<>'[]' THEN ?15 ELSE people_json END,
              updated_at=?9 WHERE id=?12",
             params![
                 metadata.title,
@@ -1618,7 +1687,8 @@ impl Database {
                 preserve_title,
                 media_id,
                 metadata.collection_id,
-                metadata.collection_name
+                metadata.collection_name,
+                serde_json::to_string(people)?
             ],
         )?;
         Ok(())
@@ -1783,6 +1853,34 @@ impl Database {
             .as_deref()
             .and_then(|value| serde_json::from_str::<Vec<CategoryPreference>>(value).ok())
             .unwrap_or_default())
+    }
+
+    /// Whether this account wants to drag shelves sideways with the pointer.
+    pub fn carousel_drag(&self, account_id: Option<&str>) -> Result<bool> {
+        let stored: Option<String> = self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT value_json FROM settings WHERE key=?1",
+                [carousel_drag_key(account_id)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(stored
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<bool>(value).ok())
+            .unwrap_or(false))
+    }
+
+    /// Turns dragging shelves sideways on or off for one account.
+    pub fn set_carousel_drag(&self, account_id: Option<&str>, enabled: bool) -> Result<()> {
+        let value = serde_json::to_string(&enabled)?;
+        let now = Utc::now().to_rfc3339();
+        self.connection.lock().execute(
+            "INSERT INTO settings(key,value_json,updated_at) VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
+            params![carousel_drag_key(account_id), value, now],
+        )?;
+        Ok(())
     }
 
     /// Reads the look of the category strip chosen by an account.
@@ -2341,6 +2439,11 @@ fn category_style_key(account_id: Option<&str>) -> String {
 /// Settings key holding the shelves one account created by hand.
 fn custom_categories_key(account_id: Option<&str>) -> String {
     format!("custom_categories:{}", account_id.unwrap_or_default())
+}
+
+/// Settings key holding whether shelves can be dragged sideways.
+fn carousel_drag_key(account_id: Option<&str>) -> String {
+    format!("carousel_drag:{}", account_id.unwrap_or_default())
 }
 
 /// Shelves that exist but stay off until the account turns them on.
@@ -3159,6 +3262,81 @@ mod tests {
     }
 
     #[test]
+    fn empty_portable_people_never_erase_a_complete_local_cast() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        let item = db
+            .upsert_file(
+                &root,
+                "scan-1",
+                &discovered_file(r"D:\media\Alien.mp4", "alien-people"),
+            )
+            .unwrap();
+        let people = serde_json::json!([{
+            "name": "Sigourney Weaver",
+            "role": "actor",
+            "character": "Ripley",
+            "photoUrl": r"D:\cache\ripley.jpg"
+        }])
+        .to_string();
+        db.connection
+            .lock()
+            .execute(
+                "UPDATE media_items SET people_json=?1 WHERE id=?2",
+                params![people, item.media_id],
+            )
+            .unwrap();
+        let mut portable = db
+            .portable_media_export(&item.media_id)
+            .unwrap()
+            .unwrap()
+            .metadata;
+        portable.people.clear();
+
+        db.apply_portable_metadata(
+            &item.media_id,
+            &portable,
+            r"D:\media\.cinewana\metadata.json",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let saved: String = db
+            .connection
+            .lock()
+            .query_row(
+                "SELECT people_json FROM media_items WHERE id=?1",
+                [&item.media_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(saved.contains("Sigourney Weaver"));
+    }
+
+    #[test]
+    fn rescan_refreshes_an_imported_tmdb_title_when_people_are_missing() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        let item = db
+            .upsert_file(
+                &root,
+                "scan-1",
+                &discovered_file(r"D:\media\Alien.mp4", "alien-refresh"),
+            )
+            .unwrap();
+        db.connection
+            .lock()
+            .execute(
+                "UPDATE media_items SET metadata_status='imported',metadata_source_url='https://www.themoviedb.org/movie/348',manual_metadata=1,people_json='[]' WHERE id=?1",
+                [&item.media_id],
+            )
+            .unwrap();
+
+        assert!(db.should_auto_import_metadata(&item.media_id).unwrap());
+    }
+
+    #[test]
     fn exposes_ambiguous_tmdb_posters_in_the_review_queue() {
         let db = Database::open(":memory:").unwrap();
         let root = db.seed_root(r"D:\media").unwrap();
@@ -3653,6 +3831,7 @@ mod tests {
             backdrop_url: None,
             collection_id: None,
             collection_name: None,
+            people: vec![],
         };
 
         db.apply_imported_metadata(
@@ -3662,6 +3841,7 @@ mod tests {
             Some(r"D:\cache\daybreakers.jpg"),
             None,
             true,
+            &[],
         )
         .unwrap();
         let account = db.create_account("Jael", "abcd1").unwrap();
@@ -4414,11 +4594,13 @@ mod tests {
                     backdrop_url: None,
                     collection_id: Some("tmdb:8091".into()),
                     collection_name: Some("Colección Alien".into()),
+                    people: vec![],
                 },
                 None,
                 None,
                 None,
                 false,
+                &[],
             )
             .unwrap();
         }

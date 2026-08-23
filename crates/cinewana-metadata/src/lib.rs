@@ -330,6 +330,7 @@ fn page_to_imported(
         backdrop_url: None,
         collection_id: None,
         collection_name: None,
+        people: vec![],
     })
 }
 

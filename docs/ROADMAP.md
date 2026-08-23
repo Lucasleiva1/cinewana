@@ -109,6 +109,10 @@
 - Reordering categories is a grab-and-carry gesture that reorders live and saves on release, replacing the up/down buttons
 - Every category carries its own icon, and the name strip ships in two looks selectable per account from Configuración: `gold`, the default, paints the whole row in the brand gold, while `dark` keeps neutral chips and gilds only the icons
 - The remote control mirrors the same categories in the same order, flattening sagas into a single shelf for the phone
+- Title sheets show direction, writing and the ten billed actors with their photo and the character they play, falling back to initials when the provider has no picture
+- Cast photos are copied into each title's portable `.cinewana` folder, so faces survive moving the drive to a computer that never saw the metadata
+- Configuración can refresh every sheet in one pass, with visible progress and a cancel, so titles imported before a feature existed catch up
+- Movie title sheets once again occupy the complete CINE WANA window, keep their close control fixed, hide native Windows scrollbars, and open cast photos in a centered, keyboard-dismissable viewer whose close control sits directly on the photo
 
 ## Pending after the functional media pass
 
@@ -120,6 +124,8 @@
 
 ## In progress: local remote control PWA
 
+- Prepared version 0.3.10 as the signed updater release for full-screen title sheets, cast and director photos, complete metadata rescanning, portable person artwork, draggable-shelf preferences, and a fixed mobile remote-control layout
+- The mobile player keeps its progress, transport, volume, and quick-control geometry mounted from the first snapshot; connection updates only replace values, and next-content renders below the fixed volume area
 - The internal player now opens the same complete Settings view in a side panel matching the Image panel width, so playback can continue while remote control and other options are managed
 - Remote-control Settings now includes a persistent **Siempre activo** switch that starts the authenticated local service automatically when CINE WANA opens while preserving the manual activate/deactivate button
 - Prepared version 0.3.6 as the signed updater release for in-player access to the shared Settings view and persistent automatic remote-control startup

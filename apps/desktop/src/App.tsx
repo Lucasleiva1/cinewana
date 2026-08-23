@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
@@ -8,9 +8,9 @@ import {
   Crosshair, Drama, Eye, EyeOff, Film, Fingerprint, FolderCog, Ghost, GripVertical, Heart, History, Landmark,
   LayoutGrid, Layers, Mountain, Music, Palette, Puzzle, Rocket, Smile, Sparkles, Sun, Swords, VenetianMask,
   FolderOpen, Home, ImagePlus, KeyRound, Library, ListVideo, LoaderCircle, LogOut, Pencil, Play, RefreshCw, Save,
-  Copy, Plus, QrCode, Radio, RotateCcw, Search, Settings, ShieldCheck, Smartphone, Star, Tags, Tv, UserRound, Users, Wifi, X
+  Clapperboard, Copy, Plus, QrCode, Radio, RotateCcw, Search, Settings, ShieldCheck, Smartphone, Star, Tags, Tv, UserRound, Users, Wifi, X
 } from 'lucide-react';
-import type { Bootstrap, CategoryKind, CategoryOption, CategoryPreference, CategoryRow, CategoryStyle, CustomCategory, ClassificationUpdate, HomeDto, IdentificationReview, MediaDetail, MediaMetadataCandidate, MediaMetadataUpdate, MediaSummary, RemoteCommand, RemoteStatus, SagaSummary, ScanProgress, SeriesSummary } from './types';
+import type { Bootstrap, CategoryKind, CategoryOption, CategoryPreference, CategoryRow, CategoryStyle, CustomCategory, MediaPerson, MetadataRefreshProgress, ClassificationUpdate, HomeDto, IdentificationReview, MediaDetail, MediaMetadataCandidate, MediaMetadataUpdate, MediaSummary, RemoteCommand, RemoteStatus, SagaSummary, ScanProgress, SeriesSummary } from './types';
 import { InternalPlayer, type InternalPlayerSource } from './InternalPlayer';
 import { countLibrary } from './libraryCounts';
 import tmdbLogo from './tmdb-logo.svg';
@@ -19,7 +19,11 @@ type Page = 'Inicio'|'Categorías'|'Sagas'|'Películas'|'Series'|'Continuar vien
 type AuthMode = 'create'|'login';
 type PendingAccount = { name:string; password:string };
 type PendingUpdate = Awaited<ReturnType<typeof check>>;
-const emptyHome: HomeDto = { heroes:[],continueWatching:[],recentlyAdded:[],movies:[],series:[],favorites:[],categories:[],categorySettings:[],categoryStyle:'gold',customCategories:[] };
+/* El arrastre lateral lo consulta cada fila. Va por contexto para no encadenar la preferencia por
+   toda la jerarquia de componentes que hay entre Configuracion y una fila del inicio. */
+const CarouselDragContext = createContext(false);
+
+const emptyHome: HomeDto = { heroes:[],continueWatching:[],recentlyAdded:[],movies:[],series:[],favorites:[],categories:[],categorySettings:[],categoryStyle:'gold',customCategories:[],carouselDrag:false };
 const emptyScan: ScanProgress = {running:false,cancelRequested:false,found:0,processed:0,skipped:0,errors:0,percent:0};
 
 const navigation: Array<{label:Page; icon: typeof Home}> = [
@@ -41,6 +45,7 @@ export function App() {
   const [seriesDetail,setSeriesDetail]=useState<SeriesSummary|null>(null);
   const [sagaDetail,setSagaDetail]=useState<SagaSummary|null>(null);
   const [category,setCategory]=useState<string|null>(null);
+  const [metadataRefresh,setMetadataRefresh]=useState<MetadataRefreshProgress|null>(null);
   const [playerSource,setPlayerSource]=useState<InternalPlayerSource|null>(null);
   const [availableUpdate,setAvailableUpdate]=useState<PendingUpdate|null>(null);
   const [updateMessage,setUpdateMessage]=useState<string|null>(null);
@@ -65,6 +70,7 @@ export function App() {
 
   useEffect(()=>{ void refresh(); const unsubs=[listen<ScanProgress>('scan-progress',e=>setScan(e.payload)),listen('library-changed',()=>void refresh())]; return()=>{void Promise.all(unsubs).then(values=>values.forEach(fn=>fn()));};},[refresh]);
   useEffect(()=>{let timer:number;const schedule=()=>{const now=new Date();const next=new Date(now);next.setHours(24,0,1,0);timer=window.setTimeout(()=>{void refresh();schedule();},next.getTime()-now.getTime());};schedule();return()=>window.clearTimeout(timer);},[refresh]);
+  useEffect(()=>{let cleanup:(()=>void)|undefined;void listen<MetadataRefreshProgress>('metadata-refresh',event=>setMetadataRefresh(event.payload)).then(unlisten=>cleanup=unlisten);return()=>cleanup?.();},[]);
   useEffect(()=>{void invoke<RemoteStatus>('remote_status').then(setRemoteStatus).catch(()=>{});let cleanup:(()=>void)|undefined;void listen<RemoteStatus>('remote-status-changed',event=>setRemoteStatus(event.payload)).then(unlisten=>cleanup=unlisten);return()=>cleanup?.();},[]);
   useEffect(()=>{if(home.heroes.length<2||detail||seriesDetail)return;const timer=setInterval(()=>setHeroIndex(i=>(i+1)%home.heroes.length),8000);return()=>clearInterval(timer);},[home.heroes.length,detail,seriesDetail]);
   useEffect(()=>setHeroIndex(i=>Math.min(i,Math.max(home.heroes.length-1,0))),[home.heroes.length]);
@@ -80,10 +86,13 @@ export function App() {
     return list;
   },[items,page,search]);
 
+  const startMetadataRefresh=()=>{void invoke<MetadataRefreshProgress>('refresh_all_metadata').then(final=>{setMetadataRefresh(final);void refresh();}).catch(cause=>setError(String(cause)));};
+  const cancelMetadataRefresh=()=>{void invoke('cancel_metadata_refresh').catch(cause=>setError(String(cause)));};
   const createCategory=async(label:string)=>{try{setError(null);setHome(await invoke<HomeDto>('create_category',{label}));}catch(cause){setError(String(cause));throw cause;}};
   const renameCategory=async(id:string,label:string)=>{try{setError(null);setHome(await invoke<HomeDto>('rename_category',{id,label}));}catch(cause){setError(String(cause));throw cause;}};
   const deleteCategory=async(id:string)=>{try{setError(null);setHome(await invoke<HomeDto>('delete_category',{id}));}catch(cause){setError(String(cause));throw cause;}};
   const setCategoryMember=async(id:string,member:boolean,mediaId?:string,seriesTitle?:string)=>{try{setError(null);setHome(await invoke<HomeDto>('set_category_member',{id,mediaId:mediaId??null,seriesTitle:seriesTitle??null,member}));}catch(cause){setError(String(cause));}};
+  const toggleCarouselDrag=async(enabled:boolean)=>{try{setError(null);setHome(await invoke<HomeDto>('set_carousel_drag',{enabled}));}catch(cause){setError(String(cause));}};
   const saveCategoryStyle=async(style:CategoryStyle)=>{try{setError(null);setHome(await invoke<HomeDto>('set_category_style',{style}));}catch(cause){setError(String(cause));}};
   const saveCategories=async(preferences:CategoryPreference[])=>{try{setError(null);setHome(await invoke<HomeDto>('set_category_order',{preferences}));}catch(cause){setError(String(cause));throw cause;}};
   const rescan=async()=>{try{if(scan.running){setScan(await invoke('cancel_scan'));}else{setScan(await invoke('start_scan',{reason:'manual'}));}}catch(cause){setError(String(cause));}};
@@ -108,11 +117,11 @@ export function App() {
   const installAvailableUpdate=async()=>{if(!availableUpdate)return;try{setUpdating(true);let downloaded=0;let contentLength=0;await availableUpdate.downloadAndInstall(event=>{if(event.event==='Started'){contentLength=event.data.contentLength||0;setUpdateMessage('Descargando actualización...');}else if(event.event==='Progress'){downloaded+=event.data.chunkLength;setUpdateMessage(contentLength?`Descargando ${Math.round(downloaded/contentLength*100)}%`:'Descargando actualización...');}else if(event.event==='Finished'){setUpdateMessage('Instalando actualización...');}});setUpdateMessage('Actualización instalada. En Windows la app se cerrará para terminar.');}catch(cause){setUpdateMessage(`No se pudo instalar la actualización: ${String(cause)}`);}finally{setUpdating(false);}};
   const hero=home.heroes[heroIndex];
   const libraryCounts=useMemo(()=>countLibrary(home.movies,home.series),[home.movies,home.series]);
-  const settingsProps=boot?{boot,scan,updating,updateMessage,updateVersion:availableUpdate?.version,metadataNotice,onRescan:rescan,onChoose:chooseFolder,onLogout:logout,onCheckUpdates:checkForUpdates,onInstallUpdate:installAvailableUpdate,onResolveIdentification:resolveIdentification,onApplyMetadataCandidate:applyMetadataCandidateFromSettings,onRefreshMetadata:refreshMetadataFromSettings,categoryOptions:home.categorySettings,onSaveCategories:saveCategories,categoryStyle:home.categoryStyle,onSaveCategoryStyle:saveCategoryStyle,customCategories:home.customCategories,onCreateCategory:createCategory,onRenameCategory:renameCategory,onDeleteCategory:deleteCategory,remote:remoteStatus,remoteBusy,runRemoteAction}:null;
+  const settingsProps=boot?{boot,scan,updating,updateMessage,updateVersion:availableUpdate?.version,metadataNotice,onRescan:rescan,onChoose:chooseFolder,onLogout:logout,onCheckUpdates:checkForUpdates,onInstallUpdate:installAvailableUpdate,onResolveIdentification:resolveIdentification,onApplyMetadataCandidate:applyMetadataCandidateFromSettings,onRefreshMetadata:refreshMetadataFromSettings,categoryOptions:home.categorySettings,onSaveCategories:saveCategories,categoryStyle:home.categoryStyle,onSaveCategoryStyle:saveCategoryStyle,carouselDrag:home.carouselDrag,onToggleCarouselDrag:toggleCarouselDrag,metadataRefresh,onStartRefresh:startMetadataRefresh,onCancelRefresh:cancelMetadataRefresh,customCategories:home.customCategories,onCreateCategory:createCategory,onRenameCategory:renameCategory,onDeleteCategory:deleteCategory,remote:remoteStatus,remoteBusy,runRemoteAction}:null;
 
   if(boot&&!boot.activeAccount)return <AuthScreen boot={boot} mode={authMode} setMode={setAuthMode} pendingAccount={pendingAccount} onSubmit={submitAccount} onConfirmCreate={confirmCreateAccount} onCancelCreate={()=>setPendingAccount(null)} error={error} clearError={()=>setError(null)}/>;
 
-  return <div className="app-shell">
+  return <CarouselDragContext.Provider value={home.carouselDrag}><div className="app-shell">
     <aside className="sidebar">
       <div className="brand"><span>CINE</span><strong>WANA</strong></div>
       <nav>{navigation.map(({label,icon:Icon})=><button key={label} className={page===label?'active':''} title={label} onClick={()=>setPage(label)}><Icon size={18}/><span>{label}</span></button>)}</nav>
@@ -141,7 +150,7 @@ export function App() {
       onProgressSaved={()=>void refresh()}
       settingsPanel={<RemoteSettingsPage {...settingsProps}/>}
     />}
-  </div>;
+  </div></CarouselDragContext.Provider>;
 }
 
 function Loading(){return <div className="loading-screen"><LoaderCircle className="spin"/><b>Preparando tu biblioteca</b><span>La primera lectura puede tardar unos segundos.</span></div>}
@@ -366,14 +375,15 @@ function SagaCard({saga,openSaga}:{saga:SagaSummary;openSaga:(saga:SagaSummary)=
 }
 
 function SagaDetailModal({saga,close,openDetail,playMedia}:{saga:SagaSummary;close:()=>void;openDetail:(id:string)=>void;playMedia:(id:string)=>void}){
-  return <div className="modal-backdrop" onClick={close}><section className="detail-modal series-detail-modal" onClick={event=>event.stopPropagation()}>
-    <button className="modal-close" onClick={close}><X size={17}/></button>
+  return <div className="modal-backdrop" onClick={close}><section className="series-detail-modal" onClick={event=>event.stopPropagation()}>
+    <button className="modal-close" onClick={close} aria-label="Cerrar saga" title="Cerrar"><X size={17} aria-hidden="true"/></button>
+    <div className="detail-scroll">
     <div className="page-heading"><div><span className="eyebrow">SAGA COMPLETA</span><h1>{saga.title}</h1></div><span>{saga.items.length} películas</span></div>
     <div className="card-grid">{saga.items.map((item,index)=><article key={item.id} className="media-card">
       <div className="poster-button"><button className="poster-detail" onClick={()=>openDetail(item.id)} aria-label={`Ver detalles de ${displayTitle(item)}`}><Poster title={displayTitle(item)} label={`PARTE ${item.sagaPosition||index+1}`} src={item.artworkUrl}/></button><button className="hover-play" onClick={()=>void playMedia(item.id)} title="Reproducir"><Play fill="currentColor"/></button></div>
       <div className="card-copy"><div><button className="title-link" onClick={()=>openDetail(item.id)}>{displayTitle(item)}</button><p>{item.year||'Sin año'}</p></div></div>
     </article>)}</div>
-  </section></div>;
+  </div></section></div>;
 }
 
 function EmptyLibrary(){return <section className="empty-library"><Library size={42}/><h1>Tu sala está lista</h1><p>Conectá la carpeta predeterminada o elegí otra desde Configuración y después reescaneá.</p></section>}
@@ -454,6 +464,31 @@ export function IdentificationReviewCard({review,onResolve,onApplyCandidate,onRe
   </article>
 }
 
+/* Las fichas viejas no tienen fotos ni sagas porque se importaron antes de que existieran. Este
+   boton las repasa una por una: tarda, pero se deja corriendo y se puede cortar cuando sea. */
+function MetadataRefreshCard({progress,onStart,onCancel}:{progress:MetadataRefreshProgress|null;onStart:()=>void;onCancel:()=>void}){
+  const running=Boolean(progress?.running);
+  const percent=progress&&progress.total>0?Math.round(progress.processed/progress.total*100):0;
+  return <div className="content settings-page"><section className="settings-card">
+    <div className="settings-icon"><Users/></div>
+    <div className="settings-main">
+      <div className="settings-title"><div><h2>Actualizar fichas</h2><p>Vuelve a pedirle a TMDB los datos de cada título: actores con foto, dirección, guion y sagas</p></div><span className={`root-status ${running?'scanning':''}`}>{running?'En curso':'Manual'}</span></div>
+      {progress&&(running||progress.finished)&&<>
+        <div className="refresh-meter"><i style={{width:`${percent}%`}}/></div>
+        <div className="refresh-stats">
+          <span>{progress.processed} de {progress.total}</span>
+          <span>{progress.updated} actualizadas</span>
+          {progress.failed>0&&<span className="failed">{progress.failed} sin coincidencia</span>}
+          {running&&progress.currentTitle&&<span className="current">{progress.currentTitle}</span>}
+          {progress.finished&&!running&&<span className="done"><Check size={13}/>{progress.cancelRequested?'Cancelado':'Terminado'}</span>}
+        </div>
+      </>}
+      <p className="pending-note"><CircleAlert size={15}/>Va de a una película por vez para no saturar a TMDB, así que tarda un rato largo. Podés seguir usando CINE WANA mientras corre, y cortarlo cuando quieras sin perder lo ya hecho.</p>
+      <button className={`primary settings-rescan ${running?'':''}`} onClick={()=>running?onCancel():onStart()}>{running?<><X/>Cancelar</>:<><RefreshCw/>Actualizar todas las fichas</>}</button>
+    </div>
+  </section></div>;
+}
+
 /* Categorías propias: se crean acá y se llenan desde la ficha de cada película o serie, que es
    donde uno está mirando cuando decide que algo va a una lista. */
 function CustomCategoriesCard({categories,onCreate,onRename,onDelete}:{categories:CustomCategory[];onCreate:(label:string)=>Promise<void>;onRename:(id:string,label:string)=>Promise<void>;onDelete:(id:string)=>Promise<void>}){
@@ -499,13 +534,17 @@ function CustomCategoryPicker({categories,mediaId,seriesTitle,onToggle}:{categor
 
 /* Las dos tiras se dibujan con las categorías reales de la biblioteca, así se elige mirando lo que
    uno va a ver de verdad y no una muestra inventada. */
-function CategoryStyleCard({categories,style,onSelect}:{categories:CategoryOption[];style:CategoryStyle;onSelect:(style:CategoryStyle)=>Promise<void>}){
+function CategoryStyleCard({categories,style,onSelect,carouselDrag,onToggleDrag}:{categories:CategoryOption[];style:CategoryStyle;onSelect:(style:CategoryStyle)=>Promise<void>;carouselDrag:boolean;onToggleDrag:(enabled:boolean)=>Promise<void>}){
   const sample=categories.filter(row=>!row.hidden).slice(0,6);
   const options:Array<[CategoryStyle,string,string]>=[['gold','Dorada','Todo el renglón en dorado, con la elegida encendida.'],['dark','Sobria','Fondo gris oscuro y sólo los íconos en dorado.']];
   return <div className="content settings-page"><section className="settings-card">
     <div className="settings-icon"><Palette/></div>
     <div className="settings-main">
       <div className="settings-title"><div><h2>Estilo de la tira</h2><p>Cómo se ven los nombres de categoría abajo de la portada</p></div><span className="root-status">{style==='gold'?'Dorada':'Sobria'}</span></div>
+      <label className="style-toggle">
+        <input type="checkbox" checked={carouselDrag} onChange={event=>void onToggleDrag(event.target.checked)}/>
+        <span><b>Arrastrar las filas con el mouse</b><small>Con esto activado el puntero se convierte en una manito sobre las portadas y sirve para correr la fila de costado. Desactivado, las filas se mueven solo con las flechas y hacer clic en una película es más directo.</small></span>
+      </label>
       <div className="style-options">
         {options.map(([id,label,hint])=><button key={id} className={`style-option ${style===id?'selected':''}`} onClick={()=>void onSelect(id)}>
           <span className="style-option-head"><b>{label}</b>{style===id?<span className="style-option-active"><Check size={12}/>En uso</span>:<span className="style-option-pick">Usar esta</span>}</span>
@@ -597,11 +636,11 @@ function CategoryOrderCard({categories,style,onSave}:{categories:CategoryOption[
   </section></div>;
 }
 
-type SettingsProps={boot:Bootstrap;scan:ScanProgress;updating:boolean;updateMessage:string|null;updateVersion?:string;metadataNotice:string|null;onRescan:()=>void;onChoose:()=>void;onLogout:()=>void;onCheckUpdates:()=>void;onInstallUpdate:()=>void;onResolveIdentification:(mediaId:string,classification:ClassificationUpdate)=>Promise<void>;onApplyMetadataCandidate:(mediaId:string,candidate:MediaMetadataCandidate)=>Promise<void>;onRefreshMetadata:(mediaId:string)=>Promise<void>;categoryOptions:CategoryOption[];onSaveCategories:(preferences:CategoryPreference[])=>Promise<void>;categoryStyle:CategoryStyle;onSaveCategoryStyle:(style:CategoryStyle)=>Promise<void>;customCategories:CustomCategory[];onCreateCategory:(label:string)=>Promise<void>;onRenameCategory:(id:string,label:string)=>Promise<void>;onDeleteCategory:(id:string)=>Promise<void>};
+type SettingsProps={boot:Bootstrap;scan:ScanProgress;updating:boolean;updateMessage:string|null;updateVersion?:string;metadataNotice:string|null;onRescan:()=>void;onChoose:()=>void;onLogout:()=>void;onCheckUpdates:()=>void;onInstallUpdate:()=>void;onResolveIdentification:(mediaId:string,classification:ClassificationUpdate)=>Promise<void>;onApplyMetadataCandidate:(mediaId:string,candidate:MediaMetadataCandidate)=>Promise<void>;onRefreshMetadata:(mediaId:string)=>Promise<void>;categoryOptions:CategoryOption[];onSaveCategories:(preferences:CategoryPreference[])=>Promise<void>;categoryStyle:CategoryStyle;onSaveCategoryStyle:(style:CategoryStyle)=>Promise<void>;carouselDrag:boolean;onToggleCarouselDrag:(enabled:boolean)=>Promise<void>;metadataRefresh:MetadataRefreshProgress|null;onStartRefresh:()=>void;onCancelRefresh:()=>void;customCategories:CustomCategory[];onCreateCategory:(label:string)=>Promise<void>;onRenameCategory:(id:string,label:string)=>Promise<void>;onDeleteCategory:(id:string)=>Promise<void>};
 function RemoteSettingsPage(props:SettingsProps&{remote:RemoteStatus|null;remoteBusy:boolean;runRemoteAction:(command:string,args?:Record<string,unknown>)=>Promise<void>}){
-  const {remote,remoteBusy,runRemoteAction,onResolveIdentification,onApplyMetadataCandidate,onRefreshMetadata,categoryOptions,onSaveCategories,categoryStyle,onSaveCategoryStyle,customCategories,onCreateCategory,onRenameCategory,onDeleteCategory,...settings}=props;
+  const {remote,remoteBusy,runRemoteAction,onResolveIdentification,onApplyMetadataCandidate,onRefreshMetadata,categoryOptions,onSaveCategories,categoryStyle,onSaveCategoryStyle,carouselDrag,onToggleCarouselDrag,metadataRefresh,onStartRefresh,onCancelRefresh,customCategories,onCreateCategory,onRenameCategory,onDeleteCategory,...settings}=props;
   const copyUrl=async()=>{if(remote?.pairing?.url)await navigator.clipboard.writeText(remote.pairing.url);else if(remote?.url)await navigator.clipboard.writeText(remote.url);};
-  return <div className="cw-shared-settings"><SettingsPage {...settings}/><CategoryStyleCard categories={categoryOptions} style={categoryStyle} onSelect={onSaveCategoryStyle}/><CustomCategoriesCard categories={customCategories} onCreate={onCreateCategory} onRename={onRenameCategory} onDelete={onDeleteCategory}/><CategoryOrderCard categories={categoryOptions} style={categoryStyle} onSave={onSaveCategories}/><TmdbCreditsCard/><IdentificationReviewSettings reviews={props.boot.identificationReviews} metadataNotice={props.metadataNotice} onResolve={onResolveIdentification} onApplyCandidate={onApplyMetadataCandidate} onRetryMetadata={onRefreshMetadata}/><div className="content settings-page remote-settings-section"><section className="settings-card remote-settings-card"><div className="settings-icon"><Radio/></div><div className="settings-main">
+  return <div className="cw-shared-settings"><SettingsPage {...settings}/><CategoryStyleCard categories={categoryOptions} style={categoryStyle} onSelect={onSaveCategoryStyle} carouselDrag={carouselDrag} onToggleDrag={onToggleCarouselDrag}/><MetadataRefreshCard progress={metadataRefresh} onStart={onStartRefresh} onCancel={onCancelRefresh}/><CustomCategoriesCard categories={customCategories} onCreate={onCreateCategory} onRename={onRenameCategory} onDelete={onDeleteCategory}/><CategoryOrderCard categories={categoryOptions} style={categoryStyle} onSave={onSaveCategories}/><TmdbCreditsCard/><IdentificationReviewSettings reviews={props.boot.identificationReviews} metadataNotice={props.metadataNotice} onResolve={onResolveIdentification} onApplyCandidate={onApplyMetadataCandidate} onRetryMetadata={onRefreshMetadata}/><div className="content settings-page remote-settings-section"><section className="settings-card remote-settings-card"><div className="settings-icon"><Radio/></div><div className="settings-main">
     <div className="settings-title"><div><h2>Control remoto</h2><p>Vinculación privada desde la misma red Wi‑Fi</p></div><span className={`root-status ${remote?.enabled?'online':''}`}>{remote?.enabled?'Activo':'Desactivado'}</span></div>
     {!remote?.assetRootReady&&<div className="remote-notice"><CircleAlert/>La interfaz móvil todavía no está compilada. El botón Activar la compilará antes de la prueba.</div>}
     {remote?.error&&<div className="remote-notice error"><CircleAlert/>{remote.error}</div>}
@@ -628,11 +667,87 @@ const detailReview=(detail:MediaDetail):IdentificationReview=>({
 });
 const reviewHasIssue=(review:IdentificationReview)=>review.identificationPending||['ambiguous','not_found','artwork_missing','pending'].includes(review.metadataStatus);
 
+/* El reparto va primero porque es lo que se busca al abrir una ficha; direccion y guion despues.
+   Sin foto se dibujan las iniciales: una silueta gris no dice nada. */
+function PeopleBlock({people,fallback,status,onReview}:{people:MediaPerson[];fallback:string[];status:string;onReview:()=>void}){
+  const [zoom,setZoom]=useState<{person:MediaPerson;note?:string}|null>(null);
+  const openZoom=(person:MediaPerson,note?:string)=>setZoom({person,note});
+  const crew=people.filter(person=>person.role!=='actor');
+  const cast=people.filter(person=>person.role==='actor');
+  if(!people.length){
+    const problema=status==='ambiguous'?'varias':status==='not_found'?'ninguna':'';
+    return <div className="cast-block">
+      <h3><Users size={15}/> Reparto</h3>
+      {fallback.length>0&&<p>{fallback.join(', ')}</p>}
+      {problema
+        ?<button className="cast-problem" onClick={onReview}>
+          <CircleAlert size={15}/>
+          <span><b>{problema==='varias'?'Hay varias películas posibles':'No se encontró esta película'}</b>
+          <small>{problema==='varias'?'TMDB no puede elegir sola. Abrí Revisión y marcá la correcta para traer el reparto.':'El nombre del archivo no alcanza. Abrí Revisión y corregí el título para traer el reparto.'}</small></span>
+          <ChevronRight size={15}/>
+        </button>
+        :<small className="cast-hint">Esta ficha se guardó antes de que existieran las fotos. Actualizala desde Configuración para verlas.</small>}
+    </div>;
+  }
+  return <div className="cast-block">
+    {cast.length>0&&<><h3><Users size={15}/> Reparto</h3>
+      <div className="people-row">{cast.map(person=><PersonCard key={person.name} person={person} note={person.character} onOpen={openZoom}/>)}</div></>}
+    {crew.length>0&&<><h3 className={cast.length?'spaced':''}><Clapperboard size={15}/> Dirección y guion</h3>
+      <div className="people-row crew">{crew.map(person=><PersonCard key={`${person.role}-${person.name}`} person={person} note={person.role==='director'?'Dirección':'Guion'} onOpen={openZoom}/>)}</div></>}
+    {zoom&&<PersonZoom person={zoom.person} note={zoom.note} close={()=>setZoom(null)}/>}
+  </div>;
+}
+
+const personInitials=(name:string)=>name.split(/\s+/).filter(Boolean).slice(0,2).map(part=>part[0]).join('').toUpperCase();
+
+function PersonCard({person,note,onOpen}:{person:MediaPerson;note?:string;onOpen:(person:MediaPerson,note?:string)=>void}){
+  return <button type="button" className="person-card" aria-label={`Ver foto de ${person.name}`} title={note?`${person.name} — ${note}`:person.name} onClick={()=>onOpen(person,note)}>
+    <span className="person-photo" style={{'--person-hue':hueFor(person.name)} as React.CSSProperties}>
+      {person.photoUrl?<img src={assetUrl(person.photoUrl)} alt="" loading="lazy"/>:<span>{personInitials(person.name)}</span>}
+    </span>
+    <span className="person-caption"><b>{person.name}</b>{note&&<small>{note}</small>}</span>
+  </button>;
+}
+
+/* Visor centrado para la persona: conserva el contexto de la ficha y se cierra desde cualquier tamaño de ventana. */
+function PersonZoom({person,note,close}:{person:MediaPerson;note?:string;close:()=>void}){
+  const closeButtonRef=useRef<HTMLButtonElement|null>(null);
+  useEffect(()=>{
+    closeButtonRef.current?.focus();
+    const onKey=(event:KeyboardEvent)=>{if(event.key==='Escape'){event.stopImmediatePropagation();close();}};
+    window.addEventListener('keydown',onKey);
+    return()=>window.removeEventListener('keydown',onKey);
+  },[close]);
+  return <div className="person-viewer" role="dialog" aria-modal="true" aria-label={`Foto de ${person.name}`} onMouseDown={event=>{if(event.target===event.currentTarget)close();}}>
+    <figure className="person-viewer-card">
+      <div className="person-viewer-photo" style={{'--person-hue':hueFor(person.name)} as React.CSSProperties}>
+        <button ref={closeButtonRef} type="button" className="person-viewer-close" onClick={close} aria-label="Cerrar foto del actor" title="Cerrar">
+          <X size={21} strokeWidth={1.9} aria-hidden="true"/>
+        </button>
+        {person.photoUrl?<img src={assetUrl(person.photoUrl)} alt={person.name}/>:<span>{personInitials(person.name)}</span>}
+      </div>
+      <figcaption className="person-viewer-copy">
+        <span>{person.role==='director'?'Dirección':person.role==='writer'?'Guion':'Reparto'}</span>
+        <h2>{person.name}</h2>
+        {note&&<p>{note}</p>}
+        <small>Presioná Esc o hacé clic fuera de la foto para cerrar.</small>
+      </figcaption>
+    </figure>
+  </div>;
+}
+
 function DetailModal({detail,review,close,setFlag,playMedia,openExternalMedia,onSaveMetadata,onRefreshMetadata,onApplyCandidate,onResolveIdentification,openDetail,metadataLoading,customCategories,onToggleCategory}:{detail:MediaDetail;review?:IdentificationReview;close:()=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void;openExternalMedia:(id:string)=>void;onSaveMetadata:(id:string,metadata:MediaMetadataUpdate)=>Promise<void>;onRefreshMetadata:(id:string)=>Promise<void>;onApplyCandidate:(id:string,candidate:MediaMetadataCandidate)=>Promise<void>;onResolveIdentification:(mediaId:string,classification:ClassificationUpdate)=>Promise<void>;openDetail:(id:string)=>Promise<void>;metadataLoading:boolean;customCategories:CustomCategory[];onToggleCategory:(id:string,member:boolean)=>Promise<void>}){
   const [editing,setEditing]=useState(false);
   const [reviewOpen,setReviewOpen]=useState(false);
   const [form,setForm]=useState(()=>detailToForm(detail));
   useEffect(()=>{setEditing(false);setForm(detailToForm(detail));},[detail]);
+  useEffect(()=>{
+    const onKey=(event:KeyboardEvent)=>{
+      if(event.key==='Escape'&&!document.querySelector('.person-viewer,.media-review-backdrop'))close();
+    };
+    window.addEventListener('keydown',onKey);
+    return()=>window.removeEventListener('keydown',onKey);
+  },[close]);
   const chooseImage=async(field:'posterPath'|'backdropPath')=>{
     const selected=await open({multiple:false,directory:false,title:field==='posterPath'?'Elegir portada':'Elegir fondo',filters:[{name:'Imagen',extensions:['png','jpg','jpeg','webp']}]});
     if(typeof selected==='string')setForm(prev=>({...prev,[field]:selected}));
@@ -640,9 +755,12 @@ function DetailModal({detail,review,close,setFlag,playMedia,openExternalMedia,on
   const save=async()=>{try{await onSaveMetadata(detail.id,{title:form.title,year:form.year.trim()?Number(form.year):null,overview:form.overview.trim()||null,genres:parseList(form.genres),cast:parseList(form.cast),posterPath:form.posterPath||null,backdropPath:form.backdropPath||null});setEditing(false);}catch{/* El aviso global conserva el error y el formulario queda abierto. */}};
   const currentReview=review??detailReview(detail);
   const hasReviewIssue=reviewHasIssue(currentReview);
-  return <><div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)close();}}>
-    <section className="detail-modal detail-modal-expanded" style={{'--detail-backdrop':detail.backdropUrl?`url("${assetUrl(detail.backdropUrl)}")`:'none'} as React.CSSProperties}>
-      <button className="modal-close" onClick={close}><X/></button>
+  return <><div className="modal-backdrop detail-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)close();}}>
+    <section className="detail-modal detail-modal-expanded" role="dialog" aria-modal="true" aria-label={`Detalles de ${displayTitle(detail)}`} style={{'--detail-backdrop':detail.backdropUrl?`url("${assetUrl(detail.backdropUrl)}")`:'none'} as React.CSSProperties}>
+      <button type="button" className="modal-close detail-close" onClick={close} aria-label="Cerrar detalles" title="Cerrar detalles">
+        <X size={24} strokeWidth={1.8} aria-hidden="true"/>
+      </button>
+      <div className="detail-scroll">
       <div className="detail-art"><Poster title={displayTitle(detail)} label={detail.kind==='episode'?'SERIE':quality(detail)} src={detail.artworkUrl}/>{editing&&<div className="art-buttons"><button onClick={()=>void chooseImage('posterPath')}><ImagePlus/>Portada</button><button onClick={()=>void chooseImage('backdropPath')}><ImagePlus/>Fondo</button></div>}</div>
       <div className="detail-copy">
         <div className="detail-headline"><span className="eyebrow">{detail.kind==='episode'?`TEMPORADA ${detail.seasonNumber} · EPISODIO ${detail.episodeNumber}`:'PELÍCULA'}</span><div><button disabled={metadataLoading} onClick={()=>void onRefreshMetadata(detail.id).catch(()=>{})}>{metadataLoading?<LoaderCircle className="spin"/>:<RefreshCw/>}Volver a buscar información</button><button onClick={()=>setEditing(value=>!value)}><Pencil/>Editar datos</button></div></div>
@@ -660,18 +778,20 @@ function DetailModal({detail,review,close,setFlag,playMedia,openExternalMedia,on
           <CustomCategoryPicker categories={customCategories} mediaId={detail.id} onToggle={onToggleCategory}/>
           <p className="overview">{detail.overview||'Todavía no hay descripción. Podés editar esta ficha y agregar la sinopsis, género, actores y portada.'}</p>
           <button className={`detail-review-button ${hasReviewIssue?'pending':''}`} onClick={()=>setReviewOpen(true)}>{hasReviewIssue?<CircleAlert/>:<ShieldCheck/>}<span><b>Revisión</b><small>{hasReviewIssue?currentReview.reason:'Identidad, portada y archivo'}</small></span></button>
-          <div className="cast-block"><h3><Users size={15}/> Reparto</h3>{detail.cast.length?<p>{detail.cast.join(', ')}</p>:<p>Sin actores cargados.</p>}</div>
+          <PeopleBlock people={detail.people} fallback={detail.cast} status={detail.metadataStatus} onReview={()=>setReviewOpen(true)}/>
           <div className="metadata-source"><h3>Información externa</h3>{detail.metadataSourceUrl?<p>Fuente: <a href={detail.metadataSourceUrl} target="_blank" rel="noreferrer">{metadataSourceLabel(detail.metadataSourceUrl)}</a>{detail.metadataImportedAt?` · ${new Date(detail.metadataImportedAt).toLocaleDateString('es-AR')}`:''}</p>:<p>{detail.metadataStatus==='ambiguous'?'TMDB encontró varias posibilidades. Abrí Revisión para elegir la correcta.':detail.metadataStatus==='not_found'?'TMDB no encontró una coincidencia segura. Abrí Revisión para corregirla.':'Todavía no hay una fuente externa guardada.'}</p>}</div>
         </>}
         <div className="detail-actions"><button className="primary" onClick={()=>void playMedia(detail.id)}><Play fill="currentColor"/>Reproducir en CINE WANA</button><button onClick={()=>void openExternalMedia(detail.id)}>Abrir externo</button><button className={detail.inWatchlist?'selected':''} onClick={()=>void setFlag(detail,'watchlist')}><Bookmark/>Mi lista</button><button className={detail.favorite?'selected':''} onClick={()=>void setFlag(detail,'favorite')}><Heart/>Favorito</button></div>
         <div className="technical"><h3>Información técnica</h3><dl><div><dt>Archivo</dt><dd>{detail.fileName}</dd></div><div><dt>Contenedor</dt><dd>{detail.technical.container||'Pendiente de ffprobe'}</dd></div><div><dt>Video</dt><dd>{detail.technical.videoCodec||'Sin analizar'}</dd></div><div><dt>Audio</dt><dd>{detail.technical.audioCodec||'Sin analizar'}</dd></div><div><dt>Subtítulos externos</dt><dd>{detail.tracks.filter(t=>t.external).length}</dd></div></dl></div>
         {detail.recommendations.length>0&&<section className="recommendations"><h3>Más para ver</h3><div>{detail.recommendations.map(item=><button key={item.id} onClick={()=>openDetail(item.id)}><Poster title={displayTitle(item)} label={item.kind==='episode'?'SERIE':quality(item)} src={item.artworkUrl}/><span>{displayTitle(item)}</span></button>)}</div></section>}
       </div>
+      </div>
     </section>
   </div>{reviewOpen&&<MediaReviewDialog detail={detail} review={currentReview} close={()=>setReviewOpen(false)} onSaveMetadata={onSaveMetadata} onResolve={onResolveIdentification} onApplyCandidate={onApplyCandidate} onRetryMetadata={onRefreshMetadata} onChanged={()=>openDetail(detail.id)}/>}</>
 }
 
 function CarouselRow({label,children}:{label:string;children:React.ReactNode}){
+  const dragEnabled=useContext(CarouselDragContext);
   const rowRef=useRef<HTMLDivElement|null>(null);
   const drag=useRef({active:false,pointerId:-1,startX:0,scrollLeft:0,moved:false});
   const [dragging,setDragging]=useState(false);
@@ -728,7 +848,8 @@ function CarouselRow({label,children}:{label:string;children:React.ReactNode}){
   };
   return <div className="carousel-shell">
     {canScroll&&<button className="carousel-button carousel-button-left" onClick={()=>scrollRow(-1)} aria-label={`Ver anteriores en ${label}`} title="Anteriores"><ChevronLeft size={20}/></button>}
-    <div ref={rowRef} className={`card-row ${dragging?'dragging':''}`} onScroll={updateCanScroll} onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag} onClickCapture={blockDraggedClick}>{children}</div>
+    <div ref={rowRef} className={`card-row ${dragging?'dragging':''} ${dragEnabled?'draggable':''}`} onScroll={updateCanScroll}
+      {...(dragEnabled?{onPointerDown:startDrag,onPointerMove:moveDrag,onPointerUp:endDrag,onPointerCancel:endDrag,onClickCapture:blockDraggedClick}:{})}>{children}</div>
     {canScroll&&<button className="carousel-button carousel-button-right" onClick={()=>scrollRow(1)} aria-label={`Ver siguientes en ${label}`} title="Siguientes"><ChevronRight size={20}/></button>}
   </div>
 }
@@ -751,7 +872,8 @@ function SeriesCard({series,openSeries}:{series:SeriesSummary;openSeries:(series
 function SeriesDetailModal({series,close,openDetail,playMedia,customCategories,onToggleCategory}:{series:SeriesSummary;close:()=>void;openDetail:(id:string)=>void;playMedia:(id:string)=>void;customCategories:CustomCategory[];onToggleCategory:(id:string,member:boolean)=>Promise<void>}){
   return <div className="modal-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)close();}}>
     <section className="series-detail-modal">
-      <button className="modal-close" onClick={close}><X/></button>
+      <button className="modal-close" onClick={close} aria-label="Cerrar serie" title="Cerrar"><X aria-hidden="true"/></button>
+      <div className="detail-scroll">
       <header>
         <span className="eyebrow">SERIE</span>
         <h1>{series.title}</h1>
@@ -780,6 +902,7 @@ function SeriesDetailModal({series,close,openDetail,playMedia,customCategories,o
             })}
           </div>
         </section>)}
+      </div>
       </div>
     </section>
   </div>

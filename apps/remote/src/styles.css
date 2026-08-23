@@ -20,10 +20,19 @@ main{padding:0 14px}.now-playing{padding:17px 16px 18px;border:1px solid #363636
 .category-strip a.pending { border-color:#b1122660; background:#b1122614; color:#e8a3ac; }
 .category-anchor { scroll-margin-top:12px; }
 
-/* The player panel keeps one height whether or not something is playing, and the quick controls
-   keep two rows of room. Track and image controls arrive a moment after the first snapshot, and
-   letting the box grow underneath pushed the volume slider away from the finger already on it. */
-.now-playing{min-height:428px}
-.quick-controls{min-height:108px;align-content:start}
+/* Player snapshots replace values without changing the geometry above or around the volume bar. */
+:root{color-scheme:dark}
+html,body{overflow-anchor:none}
+body{overflow-x:hidden}
+.now-playing{min-height:428px;overflow-anchor:none}
+.now-playing .title-line{height:68px;min-height:68px;overflow:hidden}
+.now-playing.empty>.title-line{display:flex;min-height:68px;align-items:center;margin-top:9px;text-align:left;place-content:initial}
+.now-playing.empty>.title-line h1{margin:0;font-size:20px}
+.now-playing.empty>.title-line p{max-width:330px;margin:7px 0 0;color:var(--muted);font-size:12px;line-height:1.4}
+.now-playing button:disabled,.now-playing input:disabled{cursor:default}
+.quick-controls{min-height:108px;grid-template-rows:repeat(2,50px);align-content:start}
+.quick-controls .control-placeholder{visibility:hidden;pointer-events:none}
+.remote-next-up{margin:16px 0 0;overflow-anchor:none}
+.inline-error{position:fixed;z-index:45;top:calc(76px + env(safe-area-inset-top,0px));left:50%;width:min(688px,calc(100% - 28px));margin:0;transform:translateX(-50%);box-shadow:0 14px 44px #000b}
 .category-strip{-webkit-overflow-scrolling:touch;scroll-snap-type:x proximity}
 .category-strip a{scroll-snap-align:start}

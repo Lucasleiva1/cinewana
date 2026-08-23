@@ -1,5 +1,5 @@
 mod media_stream;
-mod portable_library;
+pub mod portable_library;
 mod remote;
 
 use cinewana_core::{
@@ -38,6 +38,9 @@ struct AppServices {
     player: Arc<PlayerService>,
     media_stream: Arc<MediaStreamService>,
     remote: Arc<RemoteService>,
+    /// Guard so two bulk sheet refreshes cannot run at once.
+    metadata_refreshing: Arc<AtomicBool>,
+    metadata_cancel: Arc<AtomicBool>,
 }
 
 #[tauri::command]
@@ -180,6 +183,17 @@ fn set_category_member(
     state.db.home(Some(&account_id)).map_err(error_string)
 }
 
+/// Turns dragging shelves sideways on or off.
+#[tauri::command]
+fn set_carousel_drag(enabled: bool, state: State<'_, AppServices>) -> Result<HomeDto, String> {
+    let account_id = state.db.require_active_account_id().map_err(error_string)?;
+    state
+        .db
+        .set_carousel_drag(Some(&account_id), enabled)
+        .map_err(error_string)?;
+    state.db.home(Some(&account_id)).map_err(error_string)
+}
+
 /// Saves which of the two category-strip looks the signed-in account prefers.
 #[tauri::command]
 fn set_category_style(style: String, state: State<'_, AppServices>) -> Result<HomeDto, String> {
@@ -281,6 +295,77 @@ async fn refresh_media_metadata(
         .await
         .map_err(error_string)?;
     write_identification_cache(state.inner(), &media_id).map_err(error_string)
+}
+
+/// Progress of the bulk sheet refresh, mirrored to the interface on every title.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataRefreshProgress {
+    pub running: bool,
+    pub cancel_requested: bool,
+    pub total: u64,
+    pub processed: u64,
+    pub updated: u64,
+    pub failed: u64,
+    pub current_title: Option<String>,
+    pub finished: bool,
+}
+
+/// Fetches every sheet again so titles imported before a feature existed catch up.
+///
+/// Runs one title at a time on purpose: the provider is a shared service and a burst of parallel
+/// requests earns a rate limit that would abort the whole run.
+#[tauri::command]
+async fn refresh_all_metadata(
+    app: AppHandle,
+    state: State<'_, AppServices>,
+) -> Result<MetadataRefreshProgress, String> {
+    let services = state.inner();
+    if services.metadata_refreshing.swap(true, Ordering::SeqCst) {
+        return Err("Ya hay una actualización de fichas en curso".into());
+    }
+    services.metadata_cancel.store(false, Ordering::SeqCst);
+    let targets = services
+        .db
+        .metadata_refresh_targets()
+        .map_err(error_string)?;
+    let mut progress = MetadataRefreshProgress {
+        running: true,
+        total: targets.len() as u64,
+        ..Default::default()
+    };
+    let _ = app.emit("metadata-refresh", progress.clone());
+    for target in targets {
+        if services.metadata_cancel.load(Ordering::SeqCst) {
+            progress.cancel_requested = true;
+            break;
+        }
+        progress.current_title = Some(target.title.clone());
+        let _ = app.emit("metadata-refresh", progress.clone());
+        match import_metadata_for_target(services, &target).await {
+            Ok(()) => {
+                progress.updated += 1;
+                let _ = write_identification_cache(services, &target.media_id);
+            }
+            Err(_) => progress.failed += 1,
+        }
+        progress.processed += 1;
+        let _ = app.emit("metadata-refresh", progress.clone());
+    }
+    progress.running = false;
+    progress.finished = true;
+    progress.current_title = None;
+    services.metadata_refreshing.store(false, Ordering::SeqCst);
+    let _ = app.emit("metadata-refresh", progress.clone());
+    let _ = app.emit("library-changed", ());
+    Ok(progress)
+}
+
+/// Asks the running refresh to stop after the title it is on.
+#[tauri::command]
+fn cancel_metadata_refresh(state: State<'_, AppServices>) -> Result<(), String> {
+    state.metadata_cancel.store(true, Ordering::SeqCst);
+    Ok(())
 }
 
 #[tauri::command]
@@ -753,6 +838,15 @@ async fn import_metadata_for_target(
     services: &AppServices,
     target: &MetadataImportTarget,
 ) -> anyhow::Result<()> {
+    /* An already identified title must be refreshed by its saved TMDB identity. Searching its
+       display name again can become ambiguous and leaves old sheets without cast photos forever. */
+    if let Some(detail) = services.db.media_detail(None, &target.media_id)?
+        && let Some(candidate) = tmdb_candidate_from_detail(&detail)
+        && let Some(metadata) = services.metadata.import_candidate(&candidate).await?
+    {
+        persist_imported_metadata(services, target, &metadata, false).await?;
+        return Ok(());
+    }
     let outcome = services
         .metadata
         .search_media(
@@ -808,6 +902,7 @@ async fn persist_imported_metadata(
         poster_path.as_deref(),
         backdrop_path.as_deref(),
         preserve_title,
+        &artwork.people,
     )?;
     Ok(())
 }
@@ -1221,6 +1316,8 @@ pub fn run() {
                 player: Arc::new(PlayerService::discover()),
                 media_stream,
                 remote: remote.clone(),
+                metadata_refreshing: Arc::new(AtomicBool::new(false)),
+                metadata_cancel: Arc::new(AtomicBool::new(false)),
             };
             app.manage(services.clone());
             if let Some(main_window) = app.get_webview_window("main") {
@@ -1246,6 +1343,7 @@ pub fn run() {
             catalog,
             set_category_order,
             set_category_style,
+            set_carousel_drag,
             create_category,
             rename_category,
             delete_category,
@@ -1256,6 +1354,8 @@ pub fn run() {
             next_up,
             update_media_metadata,
             refresh_media_metadata,
+            refresh_all_metadata,
+            cancel_metadata_refresh,
             apply_metadata_candidate,
             metadata_poster_options,
             set_media_flag,

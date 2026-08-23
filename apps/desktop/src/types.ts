@@ -31,7 +31,7 @@ export interface SeriesSummary { episodeId: string; title: string; seasons: numb
 export interface HomeDto {
   heroes: MediaSummary[]; continueWatching: MediaSummary[]; recentlyAdded: MediaSummary[]; movies: MediaSummary[];
   series: SeriesSummary[]; favorites: MediaSummary[]; categories: CategoryRow[]; categorySettings: CategoryOption[];
-  categoryStyle: CategoryStyle; customCategories: CustomCategory[];
+  categoryStyle: CategoryStyle; customCategories: CustomCategory[]; carouselDrag: boolean;
 }
 export type CategoryStyle = 'gold' | 'dark';
 export interface LibraryRoot { id:string; displayName:string; enabled:boolean; recursive:boolean; watchEnabled:boolean; status:RootStatus; lastScanAt?:string; disconnectedCount:number; localPath?:string }
@@ -44,10 +44,17 @@ export interface MediaTrack { id:string; trackType:string; streamIndex:number; l
 export interface MediaMetadataCandidate {
   id:string; language:string; pageId:number; title:string; year?:number|null; description?:string|null; sourceUrl:string; posterUrl?:string|null;
 }
+export type PersonRole = 'director' | 'writer' | 'actor';
+export interface MediaPerson { name:string; role:PersonRole; character?:string; photoUrl?:string; photoFile?:string; photoSource?:string }
+export interface MetadataRefreshProgress {
+  running:boolean; cancelRequested:boolean; total:number; processed:number; updated:number; failed:number;
+  currentTitle?:string|null; finished:boolean;
+}
+
 export interface MediaDetail extends MediaSummary {
   overview?:string; genres:string[]; cast:string[]; runtimeMs?:number; tracks:MediaTrack[]; fileName:string;
   manualMetadata:boolean; metadataStatus:string; metadataSourceUrl?:string|null; metadataImportedAt?:string|null;
-  metadataCandidates:MediaMetadataCandidate[]; recommendations:MediaSummary[];
+  metadataCandidates:MediaMetadataCandidate[]; recommendations:MediaSummary[]; people:MediaPerson[];
 }
 export interface MediaMetadataUpdate {
   title:string; year?:number|null; overview?:string|null; genres:string[]; cast:string[]; posterPath?:string|null; backdropPath?:string|null;
