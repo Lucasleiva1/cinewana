@@ -4,24 +4,26 @@ import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import { check } from '@tauri-apps/plugin-updater';
 import {
-  Bookmark, Check, ChevronLeft, ChevronRight, CircleAlert, Clock3, Film, FolderCog, Heart, History,
+  ArrowDownUp, Bookmark, Camera, Check, ChevronLeft, ChevronRight, CircleAlert, Clock3,
+  Crosshair, Drama, Eye, EyeOff, Film, Fingerprint, FolderCog, Ghost, GripVertical, Heart, History, Landmark,
+  LayoutGrid, Layers, Mountain, Music, Palette, Puzzle, Rocket, Smile, Sparkles, Sun, Swords, VenetianMask,
   FolderOpen, Home, ImagePlus, KeyRound, Library, ListVideo, LoaderCircle, LogOut, Pencil, Play, RefreshCw, Save,
-  Copy, QrCode, Radio, Search, Settings, ShieldCheck, Smartphone, Star, Tags, Tv, UserRound, Users, Wifi, X
+  Copy, Plus, QrCode, Radio, RotateCcw, Search, Settings, ShieldCheck, Smartphone, Star, Tags, Tv, UserRound, Users, Wifi, X
 } from 'lucide-react';
-import type { Bootstrap, ClassificationUpdate, HomeDto, IdentificationReview, MediaDetail, MediaMetadataCandidate, MediaMetadataUpdate, MediaSummary, RemoteCommand, RemoteStatus, ScanProgress, SeriesSummary } from './types';
+import type { Bootstrap, CategoryKind, CategoryOption, CategoryPreference, CategoryRow, CategoryStyle, CustomCategory, ClassificationUpdate, HomeDto, IdentificationReview, MediaDetail, MediaMetadataCandidate, MediaMetadataUpdate, MediaSummary, RemoteCommand, RemoteStatus, SagaSummary, ScanProgress, SeriesSummary } from './types';
 import { InternalPlayer, type InternalPlayerSource } from './InternalPlayer';
 import { countLibrary } from './libraryCounts';
 import tmdbLogo from './tmdb-logo.svg';
 
-type Page = 'Inicio'|'Películas'|'Series'|'Continuar viendo'|'Mi lista'|'Favoritos'|'Agregadas recientemente'|'Historial'|'Configuración';
+type Page = 'Inicio'|'Categorías'|'Sagas'|'Películas'|'Series'|'Continuar viendo'|'Mi lista'|'Favoritos'|'Agregadas recientemente'|'Historial'|'Configuración';
 type AuthMode = 'create'|'login';
 type PendingAccount = { name:string; password:string };
 type PendingUpdate = Awaited<ReturnType<typeof check>>;
-const emptyHome: HomeDto = { heroes:[],continueWatching:[],recentlyAdded:[],movies:[],series:[],favorites:[] };
+const emptyHome: HomeDto = { heroes:[],continueWatching:[],recentlyAdded:[],movies:[],series:[],favorites:[],categories:[],categorySettings:[],categoryStyle:'gold',customCategories:[] };
 const emptyScan: ScanProgress = {running:false,cancelRequested:false,found:0,processed:0,skipped:0,errors:0,percent:0};
 
 const navigation: Array<{label:Page; icon: typeof Home}> = [
-  {label:'Inicio',icon:Home},{label:'Películas',icon:Film},{label:'Series',icon:Tv},{label:'Continuar viendo',icon:Clock3},
+  {label:'Inicio',icon:Home},{label:'Categorías',icon:Tags},{label:'Sagas',icon:Layers},{label:'Películas',icon:Film},{label:'Series',icon:Tv},{label:'Continuar viendo',icon:Clock3},
   {label:'Mi lista',icon:ListVideo},{label:'Favoritos',icon:Heart},{label:'Agregadas recientemente',icon:Star},{label:'Historial',icon:History},{label:'Configuración',icon:Settings}
 ];
 
@@ -37,6 +39,8 @@ export function App() {
   const [heroIndex,setHeroIndex]=useState(0);
   const [detail,setDetail]=useState<MediaDetail|null>(null);
   const [seriesDetail,setSeriesDetail]=useState<SeriesSummary|null>(null);
+  const [sagaDetail,setSagaDetail]=useState<SagaSummary|null>(null);
+  const [category,setCategory]=useState<string|null>(null);
   const [playerSource,setPlayerSource]=useState<InternalPlayerSource|null>(null);
   const [availableUpdate,setAvailableUpdate]=useState<PendingUpdate|null>(null);
   const [updateMessage,setUpdateMessage]=useState<string|null>(null);
@@ -76,6 +80,12 @@ export function App() {
     return list;
   },[items,page,search]);
 
+  const createCategory=async(label:string)=>{try{setError(null);setHome(await invoke<HomeDto>('create_category',{label}));}catch(cause){setError(String(cause));throw cause;}};
+  const renameCategory=async(id:string,label:string)=>{try{setError(null);setHome(await invoke<HomeDto>('rename_category',{id,label}));}catch(cause){setError(String(cause));throw cause;}};
+  const deleteCategory=async(id:string)=>{try{setError(null);setHome(await invoke<HomeDto>('delete_category',{id}));}catch(cause){setError(String(cause));throw cause;}};
+  const setCategoryMember=async(id:string,member:boolean,mediaId?:string,seriesTitle?:string)=>{try{setError(null);setHome(await invoke<HomeDto>('set_category_member',{id,mediaId:mediaId??null,seriesTitle:seriesTitle??null,member}));}catch(cause){setError(String(cause));}};
+  const saveCategoryStyle=async(style:CategoryStyle)=>{try{setError(null);setHome(await invoke<HomeDto>('set_category_style',{style}));}catch(cause){setError(String(cause));}};
+  const saveCategories=async(preferences:CategoryPreference[])=>{try{setError(null);setHome(await invoke<HomeDto>('set_category_order',{preferences}));}catch(cause){setError(String(cause));throw cause;}};
   const rescan=async()=>{try{if(scan.running){setScan(await invoke('cancel_scan'));}else{setScan(await invoke('start_scan',{reason:'manual'}));}}catch(cause){setError(String(cause));}};
   const chooseFolder=async()=>{const selected=await open({directory:true,multiple:false,title:'Elegir carpeta de películas y series'});if(typeof selected==='string'){try{await invoke('replace_library_root',{path:selected});await refresh();}catch(cause){setError(String(cause));}}};
   const openDetail=async(id:string)=>{try{const data=await invoke<MediaDetail|null>('media_detail',{id});setDetail(data);}catch(cause){setError(String(cause));}};
@@ -98,7 +108,7 @@ export function App() {
   const installAvailableUpdate=async()=>{if(!availableUpdate)return;try{setUpdating(true);let downloaded=0;let contentLength=0;await availableUpdate.downloadAndInstall(event=>{if(event.event==='Started'){contentLength=event.data.contentLength||0;setUpdateMessage('Descargando actualización...');}else if(event.event==='Progress'){downloaded+=event.data.chunkLength;setUpdateMessage(contentLength?`Descargando ${Math.round(downloaded/contentLength*100)}%`:'Descargando actualización...');}else if(event.event==='Finished'){setUpdateMessage('Instalando actualización...');}});setUpdateMessage('Actualización instalada. En Windows la app se cerrará para terminar.');}catch(cause){setUpdateMessage(`No se pudo instalar la actualización: ${String(cause)}`);}finally{setUpdating(false);}};
   const hero=home.heroes[heroIndex];
   const libraryCounts=useMemo(()=>countLibrary(home.movies,home.series),[home.movies,home.series]);
-  const settingsProps=boot?{boot,scan,updating,updateMessage,updateVersion:availableUpdate?.version,metadataNotice,onRescan:rescan,onChoose:chooseFolder,onLogout:logout,onCheckUpdates:checkForUpdates,onInstallUpdate:installAvailableUpdate,onResolveIdentification:resolveIdentification,onApplyMetadataCandidate:applyMetadataCandidateFromSettings,onRefreshMetadata:refreshMetadataFromSettings,remote:remoteStatus,remoteBusy,runRemoteAction}:null;
+  const settingsProps=boot?{boot,scan,updating,updateMessage,updateVersion:availableUpdate?.version,metadataNotice,onRescan:rescan,onChoose:chooseFolder,onLogout:logout,onCheckUpdates:checkForUpdates,onInstallUpdate:installAvailableUpdate,onResolveIdentification:resolveIdentification,onApplyMetadataCandidate:applyMetadataCandidateFromSettings,onRefreshMetadata:refreshMetadataFromSettings,categoryOptions:home.categorySettings,onSaveCategories:saveCategories,categoryStyle:home.categoryStyle,onSaveCategoryStyle:saveCategoryStyle,customCategories:home.customCategories,onCreateCategory:createCategory,onRenameCategory:renameCategory,onDeleteCategory:deleteCategory,remote:remoteStatus,remoteBusy,runRemoteAction}:null;
 
   if(boot&&!boot.activeAccount)return <AuthScreen boot={boot} mode={authMode} setMode={setAuthMode} pendingAccount={pendingAccount} onSubmit={submitAccount} onConfirmCreate={confirmCreateAccount} onCancelCreate={()=>setPendingAccount(null)} error={error} clearError={()=>setError(null)}/>;
 
@@ -118,10 +128,11 @@ export function App() {
       {scan.running&&<div className="scan-strip"><LoaderCircle className="spin" size={16}/><div><b>{scan.message||'Escaneando biblioteca'}</b><small>{scan.currentFile||`${scan.found} archivos encontrados`}</small></div><div className="scan-meter"><i style={{width:`${scan.percent}%`}}/></div><span>{Math.round(scan.percent)}%</span></div>}
       {error&&<div className="error-banner"><CircleAlert size={18}/><span>{error}</span><button onClick={()=>setError(null)}><X size={16}/></button></div>}
 
-      {!boot?<Loading/>:page==='Configuración'&&settingsProps?<RemoteSettingsPage {...settingsProps}/>:page==='Series'?<SeriesPage series={home.series} search={search} openSeries={setSeriesDetail}/>:page==='Inicio'&&!search?<HomePage home={home} hero={hero} heroIndex={heroIndex} setHeroIndex={setHeroIndex} openDetail={openDetail} openSeries={setSeriesDetail} setFlag={setFlag} playMedia={playMedia}/>:<CatalogPage title={page} items={visible} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>}
+      {!boot?<Loading/>:page==='Configuración'&&settingsProps?<RemoteSettingsPage {...settingsProps}/>:page==='Series'?<SeriesPage series={home.series} search={search} openSeries={setSeriesDetail}/>:page==='Categorías'?<CategoriesPage categories={home.categories} onSelect={id=>{setCategory(id);setPage('Inicio');}}/>:page==='Sagas'?<SagasPage categories={home.categories} openSaga={setSagaDetail}/>:page==='Inicio'&&!search?<HomePage home={home} hero={hero} heroIndex={heroIndex} setHeroIndex={setHeroIndex} openDetail={openDetail} openSeries={setSeriesDetail} openSaga={setSagaDetail} setFlag={setFlag} playMedia={playMedia} category={category} setCategory={setCategory}/>:<CatalogPage title={page} items={visible} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>}
     </main>
-    {seriesDetail&&<SeriesDetailModal series={seriesDetail} close={()=>setSeriesDetail(null)} openDetail={openDetail} playMedia={playMedia}/>}
-    {detail&&<DetailModal detail={detail} review={boot?.identificationReviews.find(item=>item.mediaId===detail.id)} close={()=>setDetail(null)} setFlag={setFlag} playMedia={playMedia} openExternalMedia={openExternalMedia} onSaveMetadata={saveMetadata} onRefreshMetadata={refreshMetadata} onApplyCandidate={applyMetadataCandidate} onResolveIdentification={resolveIdentification} openDetail={openDetail} metadataLoading={metadataLoading}/>}
+    {sagaDetail&&<SagaDetailModal saga={sagaDetail} close={()=>setSagaDetail(null)} openDetail={openDetail} playMedia={playMedia}/>}
+    {seriesDetail&&<SeriesDetailModal series={seriesDetail} close={()=>setSeriesDetail(null)} openDetail={openDetail} playMedia={playMedia} customCategories={home.customCategories} onToggleCategory={(id,member)=>setCategoryMember(id,member,undefined,seriesDetail.title)}/>}
+    {detail&&<DetailModal detail={detail} review={boot?.identificationReviews.find(item=>item.mediaId===detail.id)} close={()=>setDetail(null)} setFlag={setFlag} playMedia={playMedia} openExternalMedia={openExternalMedia} onSaveMetadata={saveMetadata} onRefreshMetadata={refreshMetadata} onApplyCandidate={applyMetadataCandidate} onResolveIdentification={resolveIdentification} openDetail={openDetail} metadataLoading={metadataLoading} customCategories={home.customCategories} onToggleCategory={(id,member)=>setCategoryMember(id,member,detail.id)}/>}
     {playerSource&&settingsProps&&<InternalPlayer
       source={playerSource}
       onClose={()=>setPlayerSource(null)}
@@ -213,19 +224,156 @@ function MediaReviewDialog({detail,review,close,onSaveMetadata,onResolve,onApply
   </div>;
 }
 
-function HomePage({home,hero,heroIndex,setHeroIndex,openDetail,openSeries,setFlag,playMedia}:{home:HomeDto;hero?:MediaSummary;heroIndex:number;setHeroIndex:(n:number)=>void;openDetail:(id:string)=>void;openSeries:(series:SeriesSummary)=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void}){
+function HomePage({home,hero,heroIndex,setHeroIndex,openDetail,openSeries,openSaga,setFlag,playMedia,category,setCategory}:{home:HomeDto;hero?:MediaSummary;heroIndex:number;setHeroIndex:(n:number)=>void;openDetail:(id:string)=>void;openSeries:(series:SeriesSummary)=>void;openSaga:(saga:SagaSummary)=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void;category:string|null;setCategory:(id:string|null)=>void}){
+  const active=home.categories.find(row=>row.id===category)||null;
   return <div className="content home-page">
     {hero?<section className="hero" style={{'--hero-hue':hueFor(hero.title),'--hero-image':hero.backdropUrl?`url("${assetUrl(hero.backdropUrl)}")`:'none'} as React.CSSProperties}>
       {hero.previewUrl&&<video key={hero.previewUrl} className="hero-video" src={assetUrl(hero.previewUrl)} muted autoPlay loop playsInline/>}<div className="hero-shade"/><div className="hero-noise"/><div className="hero-copy"><span className="eyebrow">VISTA PREVIA DE TU BIBLIOTECA</span><h1>{displayTitle(hero)}</h1><p>{hero.year||'Año sin identificar'} · {quality(hero)} {hero.technical.hdrType?`· ${hero.technical.hdrType}`:''}</p>
       <div className="hero-actions"><button className="primary" onClick={()=>void playMedia(hero.id)}><Play fill="currentColor" size={18}/>Reproducir</button><button onClick={()=>openDetail(hero.id)}>Ver detalles</button></div></div>
       <div className="hero-controls"><button onClick={()=>setHeroIndex((heroIndex-1+home.heroes.length)%home.heroes.length)}><ChevronLeft/></button><div>{home.heroes.map((_,i)=><button key={i} className={i===heroIndex?'active':''} onClick={()=>setHeroIndex(i)}/>)}</div><button onClick={()=>setHeroIndex((heroIndex+1)%home.heroes.length)}><ChevronRight/></button></div>
     </section>:<EmptyLibrary/>}
-    <MediaRow title="Continuar viendo" items={home.continueWatching} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>
-    <MediaRow title="Agregadas recientemente" items={home.recentlyAdded} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>
-    <MediaRow title="Películas" items={home.movies} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>
-    <SeriesCarouselRow title="Series" series={home.series} openSeries={openSeries}/>
-    <MediaRow title="Favoritos" items={home.favorites} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>
+    <CategoryStrip categories={home.categories} active={category} onSelect={setCategory} style={home.categoryStyle}/>
+    {active
+      ?<CategoryDetail row={active} openDetail={openDetail} openSeries={openSeries} openSaga={openSaga} setFlag={setFlag} playMedia={playMedia}/>
+      :<>
+        <MediaRow title="Continuar viendo" items={home.continueWatching} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>
+        <MediaRow title="Agregadas recientemente" items={home.recentlyAdded} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>
+        {home.categories.map(row=><CategoryCarousel key={row.id} row={row} openDetail={openDetail} openSeries={openSeries} openSaga={openSaga} setFlag={setFlag} playMedia={playMedia} onSelect={setCategory}/>)}
+        <MediaRow title="Favoritos" items={home.favorites} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>
+      </>}
   </div>;
+}
+
+/* Cada categoría lleva su ícono, así la tira se lee de un vistazo sin tener que leer palabra por
+   palabra. Las que no están acá caen en el ícono genérico. */
+const categoryIcons: Record<string,typeof Home> = {
+  'ciencia-ficcion':Rocket, sagas:Star, accion:Crosshair, suspenso:VenetianMask, drama:Drama,
+  aventura:Mountain, comedia:Smile, terror:Ghost, animacion:Palette, belica:Swords, crimen:Fingerprint,
+  documental:Camera, familia:Users, fantasia:Sparkles, historia:Landmark, misterio:Puzzle, musica:Music,
+  romance:Heart, western:Sun, 'sin-categoria':CircleAlert
+};
+const categoryIcon=(row:{id:string;kind:CategoryKind})=>row.kind==='custom'?Bookmark:row.kind==='series'?Tv:categoryIcons[row.id]||Tags;
+
+/* La tira de nombres vive pegada abajo de la portada: es donde cae la vista después de mirar el
+   fragmento, y se queda fija arriba mientras se recorren las filas. */
+function CategoryStrip({categories,active,onSelect,style}:{categories:CategoryRow[];active:string|null;onSelect:(id:string|null)=>void;style:CategoryStyle}){
+  const stripRef=useRef<HTMLElement|null>(null);
+  const [edges,setEdges]=useState({left:false,right:false});
+  const updateEdges=useCallback(()=>{
+    const strip=stripRef.current;
+    if(!strip)return;
+    setEdges({left:strip.scrollLeft>4,right:strip.scrollLeft+strip.clientWidth<strip.scrollWidth-4});
+  },[]);
+  useEffect(()=>{
+    updateEdges();
+    window.addEventListener('resize',updateEdges);
+    return()=>window.removeEventListener('resize',updateEdges);
+  },[categories,style,updateEdges]);
+  /* La categoría elegida puede quedar fuera de la vista cuando se entra desde la página de
+     Categorías, así que se la trae sola en vez de obligar a buscarla a mano. */
+  useEffect(()=>{
+    const strip=stripRef.current;
+    if(!strip||!active)return;
+    strip.querySelector(`[data-category="${CSS.escape(active)}"]`)?.scrollIntoView({behavior:'smooth',block:'nearest',inline:'center'});
+  },[active]);
+  const scrollStrip=(direction:-1|1)=>{
+    const strip=stripRef.current;
+    if(!strip)return;
+    strip.scrollBy({left:direction*Math.max(240,strip.clientWidth*0.7),behavior:'smooth'});
+    window.setTimeout(updateEdges,260);
+  };
+  if(!categories.length)return null;
+  return <div className="category-strip-shell">
+    <button className="strip-arrow strip-arrow-left" disabled={!edges.left} onClick={()=>scrollStrip(-1)} aria-label="Ver categorías anteriores" title="Anteriores"><ChevronLeft size={17}/></button>
+    <nav ref={stripRef} className={`category-strip ${style}`} aria-label="Categorías" onScroll={updateEdges}>
+      <button className={active?'':'active'} data-category="" onClick={()=>onSelect(null)}><LayoutGrid size={15}/>Todas</button>
+      {categories.map(row=>{const Icon=categoryIcon(row);return <button key={row.id} data-category={row.id} className={`${active===row.id?'active':''} ${row.kind==='uncategorized'?'pending':''} ${row.kind==='sagas'?'saga':''}`} onClick={()=>onSelect(row.id)}><Icon size={15}/>{row.label}<i>{row.count}</i></button>;})}
+    </nav>
+    <button className="strip-arrow strip-arrow-right" disabled={!edges.right} onClick={()=>scrollStrip(1)} aria-label="Ver más categorías" title="Siguientes"><ChevronRight size={17}/></button>
+  </div>;
+}
+
+/* Una fila por categoría. Las sagas y las series traen su propia tarjeta, así que la fila elige
+   qué dibujar según lo que la categoría contiene. */
+function CategoryCarousel({row,openDetail,openSeries,openSaga,setFlag,playMedia,onSelect}:{row:CategoryRow;openDetail:(id:string)=>void;openSeries:(series:SeriesSummary)=>void;openSaga:(saga:SagaSummary)=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void;onSelect:(id:string)=>void}){
+  const items=row.items||[];const series=row.series||[];const sagas=row.sagas||[];
+  if(!items.length&&!series.length&&!sagas.length)return null;
+  const pending=row.kind==='uncategorized';
+  return <section className={`media-section ${pending?'pending-section':''}`}>
+    <div className="section-title">
+      <h2>{row.label}</h2><span className={pending?'pending':''}>{row.count}</span>
+      <button className="section-more" onClick={()=>onSelect(row.id)}>{pending?'Arreglar fichas':'Ver todo'}<ChevronRight size={13}/></button>
+    </div>
+    <CarouselRow label={row.label}>
+      {sagas.map(saga=><SagaCard key={saga.id} saga={saga} openSaga={openSaga}/>)}
+      {series.map(show=><SeriesCard key={show.episodeId} series={show} openSeries={openSeries}/>)}
+      {items.map(item=><MediaCard key={item.id} item={item} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia} flagPending={pending}/>)}
+    </CarouselRow>
+  </section>;
+}
+
+/* La categoría elegida desde la tira reemplaza las filas por una grilla completa. */
+function CategoryDetail({row,openDetail,openSeries,openSaga,setFlag,playMedia}:{row:CategoryRow;openDetail:(id:string)=>void;openSeries:(series:SeriesSummary)=>void;openSaga:(saga:SagaSummary)=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void}){
+  const items=row.items||[];const series=row.series||[];const sagas=row.sagas||[];
+  const pending=row.kind==='uncategorized';
+  return <section className="media-section">
+    <div className="page-heading">
+      <div><span className="eyebrow">{pending?'FICHAS PARA COMPLETAR':'CATEGORÍA'}</span><h1>{row.label}</h1></div>
+      <span>{row.count} {row.kind==='sagas'?'sagas':'títulos'}</span>
+    </div>
+    {pending&&<p className="pending-note"><CircleAlert size={15}/>Estas fichas no tienen género o les falta la sinopsis. Abrí cada una y elegí la portada correcta de TMDB o escribí los datos a mano.</p>}
+    <div className="card-grid">
+      {sagas.map(saga=><SagaCard key={saga.id} saga={saga} openSaga={openSaga}/>)}
+      {series.map(show=><SeriesCard key={show.episodeId} series={show} openSeries={openSeries}/>)}
+      {items.map(item=><MediaCard key={item.id} item={item} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia} flagPending={pending}/>)}
+    </div>
+  </section>;
+}
+
+function CategoriesPage({categories,onSelect}:{categories:CategoryRow[];onSelect:(id:string)=>void}){
+  const titles=categories.reduce((total,row)=>total+row.count,0);
+  return <div className="content catalog-page">
+    <div className="page-heading"><div><span className="eyebrow">TU BIBLIOTECA ORDENADA</span><h1>Categorías</h1></div><span>{categories.length} categorías · {titles} títulos</span></div>
+    {categories.length
+      ?<div className="category-grid">{categories.map(row=><button key={row.id} className={`category-tile ${row.kind==='uncategorized'?'pending':''}`} onClick={()=>onSelect(row.id)}>
+        <span className="category-tile-kind">{row.kind==='sagas'?'COLECCIONES':row.kind==='series'?'SERIES':row.kind==='uncategorized'?'PARA COMPLETAR':'PELÍCULAS'}</span>
+        <b>{row.label}</b><i>{row.count}</i>
+      </button>)}</div>
+      :<div className="empty-results"><Tags/><h2>Todavía no hay categorías</h2><p>Van a aparecer solas después del próximo escaneo, con cada película en su lugar.</p></div>}
+    <p className="pending-note"><CircleAlert size={15}/>El orden se cambia desde Configuración, y vale también para la tira de arriba del inicio.</p>
+  </div>;
+}
+
+function SagasPage({categories,openSaga}:{categories:CategoryRow[];openSaga:(saga:SagaSummary)=>void}){
+  const sagas=categories.find(row=>row.kind==='sagas')?.sagas||[];
+  const movies=sagas.reduce((total,saga)=>total+saga.items.length,0);
+  return <div className="content catalog-page">
+    <div className="page-heading"><div><span className="eyebrow">PELÍCULAS QUE VAN JUNTAS</span><h1>Sagas</h1></div><span>{sagas.length} sagas · {movies} películas</span></div>
+    {sagas.length
+      ?<div className="card-grid">{sagas.map(saga=><SagaCard key={saga.id} saga={saga} openSaga={openSaga}/>)}</div>
+      :<div className="empty-results"><Layers/><h2>Todavía no se armó ninguna saga</h2><p>Se arman solas con los datos de TMDB, y con los números del título cuando TMDB no reconoce la película.</p></div>}
+  </div>;
+}
+
+function SagaCard({saga,openSaga}:{saga:SagaSummary;openSaga:(saga:SagaSummary)=>void}){
+  return <article className="media-card series-card saga-card">
+    <button className="poster-detail" onClick={()=>openSaga(saga)} aria-label={`Ver la saga ${saga.title}`}>
+      <Poster title={saga.title} label="SAGA" src={saga.artworkUrl}/>
+      <span className="saga-count">{saga.items.length}</span>
+    </button>
+    <div className="card-copy"><div><button className="title-link" onClick={()=>openSaga(saga)}>{saga.title}</button><p>{saga.items.length} películas</p></div></div>
+  </article>;
+}
+
+function SagaDetailModal({saga,close,openDetail,playMedia}:{saga:SagaSummary;close:()=>void;openDetail:(id:string)=>void;playMedia:(id:string)=>void}){
+  return <div className="modal-backdrop" onClick={close}><section className="detail-modal series-detail-modal" onClick={event=>event.stopPropagation()}>
+    <button className="modal-close" onClick={close}><X size={17}/></button>
+    <div className="page-heading"><div><span className="eyebrow">SAGA COMPLETA</span><h1>{saga.title}</h1></div><span>{saga.items.length} películas</span></div>
+    <div className="card-grid">{saga.items.map((item,index)=><article key={item.id} className="media-card">
+      <div className="poster-button"><button className="poster-detail" onClick={()=>openDetail(item.id)} aria-label={`Ver detalles de ${displayTitle(item)}`}><Poster title={displayTitle(item)} label={`PARTE ${item.sagaPosition||index+1}`} src={item.artworkUrl}/></button><button className="hover-play" onClick={()=>void playMedia(item.id)} title="Reproducir"><Play fill="currentColor"/></button></div>
+      <div className="card-copy"><div><button className="title-link" onClick={()=>openDetail(item.id)}>{displayTitle(item)}</button><p>{item.year||'Sin año'}</p></div></div>
+    </article>)}</div>
+  </section></div>;
 }
 
 function EmptyLibrary(){return <section className="empty-library"><Library size={42}/><h1>Tu sala está lista</h1><p>Conectá la carpeta predeterminada o elegí otra desde Configuración y después reescaneá.</p></section>}
@@ -233,7 +381,7 @@ function MediaRow(props:{title:string;items:MediaSummary[];openDetail:(id:string
 function CatalogPage({title,items,openDetail,setFlag,playMedia}:{title:string;items:MediaSummary[];openDetail:(id:string)=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void}){return <div className="content catalog-page"><div className="page-heading"><div><span className="eyebrow">TU BIBLIOTECA</span><h1>{title}</h1></div><span>{items.length} resultados</span></div>{items.length?<div className="card-grid">{items.map(i=><MediaCard key={i.id} item={i} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>)}</div>:<div className="empty-results"><Film/><h2>No hay contenido en esta sección</h2><p>Los elementos aparecerán después del próximo escaneo.</p></div>}</div>}
 function SeriesPage({series,search,openSeries}:{series:SeriesSummary[];search:string;openSeries:(series:SeriesSummary)=>void}){const q=search.toLocaleLowerCase();const list=series.filter(s=>s.title.toLocaleLowerCase().includes(q));const chapters=list.reduce((total,item)=>total+item.episodes,0);return <div className="content catalog-page"><div className="page-heading"><div><span className="eyebrow">CAPÍTULOS AGRUPADOS</span><h1>Series</h1></div><span>{list.length} series · {chapters} capítulos</span></div><div className="card-grid">{list.map(s=><SeriesCard key={s.episodeId} series={s} openSeries={openSeries}/>)}</div></div>}
 
-function MediaCard({item,openDetail,setFlag,playMedia}:{item:MediaSummary;openDetail:(id:string)=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void}){return <article className="media-card"><div className="poster-button"><button className="poster-detail" onClick={()=>openDetail(item.id)} aria-label={`Ver detalles de ${displayTitle(item)}`}><Poster title={displayTitle(item)} label={item.kind==='episode'?'SERIE':quality(item)} src={item.artworkUrl}/></button>{item.progressPercent>0&&<span className="card-progress"><i style={{width:`${item.progressPercent}%`}}/></span>}<button className="hover-play" onClick={()=>void playMedia(item.id)} title="Reproducir"><Play fill="currentColor"/></button></div><div className="card-copy"><div><button className="title-link" onClick={()=>openDetail(item.id)}>{displayTitle(item)}</button><p>{item.year||'Sin año'}{item.kind==='episode'?` · T${item.seasonNumber} E${item.episodeNumber}`:''}</p></div><div className="quick-actions"><button className={item.favorite?'selected':''} title="Favorito" onClick={()=>void setFlag(item,'favorite')}><Heart size={15} fill={item.favorite?'currentColor':'none'}/></button><button className={item.inWatchlist?'selected':''} title="Mi lista" onClick={()=>void setFlag(item,'watchlist')}><Bookmark size={15} fill={item.inWatchlist?'currentColor':'none'}/></button></div></div></article>}
+function MediaCard({item,openDetail,setFlag,playMedia,flagPending}:{item:MediaSummary;openDetail:(id:string)=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void;flagPending?:boolean}){return <article className="media-card"><div className="poster-button"><button className="poster-detail" onClick={()=>openDetail(item.id)} aria-label={`Ver detalles de ${displayTitle(item)}`}><Poster title={displayTitle(item)} label={flagPending&&item.incomplete?'FALTA FICHA':item.kind==='episode'?'SERIE':quality(item)} src={item.artworkUrl}/></button>{item.progressPercent>0&&<span className="card-progress"><i style={{width:`${item.progressPercent}%`}}/></span>}<button className="hover-play" onClick={()=>void playMedia(item.id)} title="Reproducir"><Play fill="currentColor"/></button></div><div className="card-copy"><div><button className="title-link" onClick={()=>openDetail(item.id)}>{displayTitle(item)}</button><p>{item.year||'Sin año'}{item.kind==='episode'?` · T${item.seasonNumber} E${item.episodeNumber}`:''}</p></div><div className="quick-actions"><button className={item.favorite?'selected':''} title="Favorito" onClick={()=>void setFlag(item,'favorite')}><Heart size={15} fill={item.favorite?'currentColor':'none'}/></button><button className={item.inWatchlist?'selected':''} title="Mi lista" onClick={()=>void setFlag(item,'watchlist')}><Bookmark size={15} fill={item.inWatchlist?'currentColor':'none'}/></button></div></div></article>}
 function Poster({title,label,src}:{title:string;label:string;src?:string}){return <div className={`poster ${src?'has-image':''}`} style={{'--poster-hue':hueFor(title)} as React.CSSProperties}>{src&&<img src={assetUrl(src)} alt=""/>}<span className="poster-label">{label}</span>{!src&&<b>{initials(title)}</b>}<small>{title}</small></div>}
 
 function SettingsPage({boot,scan,updating,updateMessage,updateVersion,onRescan,onChoose,onLogout,onCheckUpdates,onInstallUpdate}:{boot:Bootstrap;scan:ScanProgress;updating:boolean;updateMessage:string|null;updateVersion?:string;onRescan:()=>void;onChoose:()=>void;onLogout:()=>void;onCheckUpdates:()=>void;onInstallUpdate:()=>void}){const root=boot.roots.find(r=>r.enabled)||boot.roots[0];return <div className="content settings-page"><div className="page-heading"><div><span className="eyebrow">CINE WANA</span><h1>Configuración</h1></div></div><section className="settings-card compact"><div className="settings-icon"><UserRound/></div><div className="settings-main"><div className="settings-title"><div><h2>Cuenta local</h2><p>Progreso, historial y listas de esta sesión</p></div><span className="root-status online">{boot.activeAccount?.name}</span></div><div className="diagnostic-row"><span>Cuentas creadas</span><b>{boot.accounts.length}</b></div><button className="settings-rescan account-logout" onClick={onLogout}><LogOut/>Cerrar sesión</button></div></section><section className="settings-card compact"><div className="settings-icon"><RefreshCw/></div><div className="settings-main"><div className="settings-title"><div><h2>Actualizaciones</h2><p>GitHub Releases firmado para Windows x64</p></div><span className="root-status">{updateVersion?`v${updateVersion}`:'Manual'}</span></div>{updateMessage&&<div className="update-note">{updateMessage}</div>}<div className="update-actions"><button className="settings-rescan" disabled={updating} onClick={onCheckUpdates}>{updating?<><LoaderCircle className="spin"/>Buscando</>:<><RefreshCw/>Buscar actualizaciones</>}</button>{updateVersion&&<button className="primary settings-rescan" disabled={updating} onClick={onInstallUpdate}><Check/>Instalar versión</button>}</div></div></section><section className="settings-card"><div className="settings-icon"><FolderCog/></div><div className="settings-main"><div className="settings-title"><div><h2>Biblioteca</h2><p>Carpeta activa y lectura recursiva</p></div><span className={`root-status ${root?.status}`}>{root?.status==='online'?'Conectada':root?.status==='scanning'?'Escaneando':'Desconectada'}</span></div><div className="path-box"><code>{root?.localPath||'Sin carpeta configurada'}</code><button onClick={onChoose}>Cambiar carpeta</button></div><div className="settings-stats"><div><small>Último escaneo</small><b>{root?.lastScanAt?new Date(root.lastScanAt).toLocaleString('es-AR'):'Todavía no finalizó'}</b></div><div><small>Subcarpetas</small><b>{root?.recursive?'Incluidas':'Excluidas'}</b></div><div><small>Archivos desconectados</small><b>{root?.disconnectedCount||0}</b></div></div><button className="primary settings-rescan" onClick={onRescan}>{scan.running?<><X/>Cancelar escaneo</>:<><RefreshCw/>Reescanear biblioteca</>}</button></div></section><section className="settings-card compact"><div className="settings-icon"><Film/></div><div className="settings-main"><div className="settings-title"><div><h2>Componentes multimedia</h2><p>Diagnóstico del entorno de desarrollo</p></div></div><div className="diagnostic-row"><span>FFmpeg / ffprobe</span><b className={boot.ffprobeAvailable?'ok':'pending'}>{boot.ffprobeAvailable?<><Check/>Disponible</>:<><CircleAlert/>Pendiente</>}</b></div><div className="diagnostic-row"><span>Reproductor interno + externo</span><b className={boot.playerAvailable?'ok':'pending'}>{boot.playerAvailable?<><Check/>Disponible</>:<><CircleAlert/>No encontrado</>}</b></div></div></section></div>}
@@ -306,11 +454,154 @@ export function IdentificationReviewCard({review,onResolve,onApplyCandidate,onRe
   </article>
 }
 
-type SettingsProps={boot:Bootstrap;scan:ScanProgress;updating:boolean;updateMessage:string|null;updateVersion?:string;metadataNotice:string|null;onRescan:()=>void;onChoose:()=>void;onLogout:()=>void;onCheckUpdates:()=>void;onInstallUpdate:()=>void;onResolveIdentification:(mediaId:string,classification:ClassificationUpdate)=>Promise<void>;onApplyMetadataCandidate:(mediaId:string,candidate:MediaMetadataCandidate)=>Promise<void>;onRefreshMetadata:(mediaId:string)=>Promise<void>};
+/* Categorías propias: se crean acá y se llenan desde la ficha de cada película o serie, que es
+   donde uno está mirando cuando decide que algo va a una lista. */
+function CustomCategoriesCard({categories,onCreate,onRename,onDelete}:{categories:CustomCategory[];onCreate:(label:string)=>Promise<void>;onRename:(id:string,label:string)=>Promise<void>;onDelete:(id:string)=>Promise<void>}){
+  const [label,setLabel]=useState('');
+  const [editing,setEditing]=useState<string|null>(null);
+  const [draft,setDraft]=useState('');
+  const [busy,setBusy]=useState(false);
+  const create=async()=>{if(!label.trim())return;try{setBusy(true);await onCreate(label.trim());setLabel('');}finally{setBusy(false);}};
+  const rename=async(id:string)=>{if(!draft.trim()){setEditing(null);return;}try{setBusy(true);await onRename(id,draft.trim());setEditing(null);}finally{setBusy(false);}};
+  return <div className="content settings-page"><section className="settings-card">
+    <div className="settings-icon"><Bookmark/></div>
+    <div className="settings-main">
+      <div className="settings-title"><div><h2>Categorías propias</h2><p>Las armás vos y les ponés lo que quieras, sin depender de los géneros de TMDB</p></div><span className="root-status">{categories.length} creadas</span></div>
+      <div className="custom-create">
+        <input value={label} maxLength={40} placeholder="Nombre de la categoría" onChange={event=>setLabel(event.target.value)} onKeyDown={event=>{if(event.key==='Enter')void create();}}/>
+        <button className="primary settings-rescan" disabled={busy||!label.trim()} onClick={()=>void create()}><Check/>Crear</button>
+      </div>
+      {categories.length>0&&<ul className="custom-list">
+        {categories.map(category=><li key={category.id}>
+          <Bookmark size={15}/>
+          {editing===category.id
+            ?<input autoFocus value={draft} maxLength={40} onChange={event=>setDraft(event.target.value)} onKeyDown={event=>{if(event.key==='Enter')void rename(category.id);if(event.key==='Escape')setEditing(null);}} onBlur={()=>void rename(category.id)}/>
+            :<b>{category.label}</b>}
+          <span className="category-order-count">{category.items.length+category.series.length}</span>
+          <button title="Cambiar el nombre" disabled={busy} onClick={()=>{setEditing(category.id);setDraft(category.label);}}><Pencil size={15}/></button>
+          <button title="Borrar la categoría" className="danger" disabled={busy} onClick={()=>void onDelete(category.id)}><X size={15}/></button>
+        </li>)}
+      </ul>}
+      <p className="pending-note"><CircleAlert size={15}/>Para agregarle películas o series, abrí la ficha del título y tocá la categoría en <b>Mis categorías</b>. Borrar una categoría no borra ni toca ninguna película.</p>
+    </div>
+  </section></div>;
+}
+
+/* Los interruptores que aparecen en la ficha de un título. */
+function CustomCategoryPicker({categories,mediaId,seriesTitle,onToggle}:{categories:CustomCategory[];mediaId?:string;seriesTitle?:string;onToggle:(id:string,member:boolean)=>Promise<void>}){
+  if(!categories.length)return null;
+  const belongs=(category:CustomCategory)=>seriesTitle?category.series.includes(seriesTitle):Boolean(mediaId&&category.items.includes(mediaId));
+  return <div className="custom-picker">
+    <h3><Bookmark size={13}/>Mis categorías</h3>
+    <div>{categories.map(category=>{const member=belongs(category);return <button key={category.id} className={member?'selected':''} onClick={()=>void onToggle(category.id,!member)}>{member?<Check size={12}/>:<Plus size={12}/>}{category.label}</button>;})}</div>
+  </div>;
+}
+
+/* Las dos tiras se dibujan con las categorías reales de la biblioteca, así se elige mirando lo que
+   uno va a ver de verdad y no una muestra inventada. */
+function CategoryStyleCard({categories,style,onSelect}:{categories:CategoryOption[];style:CategoryStyle;onSelect:(style:CategoryStyle)=>Promise<void>}){
+  const sample=categories.filter(row=>!row.hidden).slice(0,6);
+  const options:Array<[CategoryStyle,string,string]>=[['gold','Dorada','Todo el renglón en dorado, con la elegida encendida.'],['dark','Sobria','Fondo gris oscuro y sólo los íconos en dorado.']];
+  return <div className="content settings-page"><section className="settings-card">
+    <div className="settings-icon"><Palette/></div>
+    <div className="settings-main">
+      <div className="settings-title"><div><h2>Estilo de la tira</h2><p>Cómo se ven los nombres de categoría abajo de la portada</p></div><span className="root-status">{style==='gold'?'Dorada':'Sobria'}</span></div>
+      <div className="style-options">
+        {options.map(([id,label,hint])=><button key={id} className={`style-option ${style===id?'selected':''}`} onClick={()=>void onSelect(id)}>
+          <span className="style-option-head"><b>{label}</b>{style===id?<span className="style-option-active"><Check size={12}/>En uso</span>:<span className="style-option-pick">Usar esta</span>}</span>
+          <nav className={`category-strip ${id}`} aria-hidden="true">
+            <span className="active"><LayoutGrid size={15}/>Todas</span>
+            {sample.map(row=>{const Icon=categoryIcon(row);return <span key={row.id} className={`${row.kind==='uncategorized'?'pending':''} ${row.kind==='sagas'?'saga':''}`}><Icon size={15}/>{row.label}<i>{row.count}</i></span>;})}
+          </nav>
+          <small>{hint}</small>
+        </button>)}
+      </div>
+    </div>
+  </section></div>;
+}
+
+/* Una sola lista manda sobre la tira de arriba y sobre las filas: ordenar dos veces lo mismo sólo
+   consigue que la tira diga una cosa y las filas otra. */
+function CategoryOrderCard({categories,style,onSave}:{categories:CategoryOption[];style:CategoryStyle;onSave:(preferences:CategoryPreference[])=>Promise<void>}){
+  const [list,setList]=useState(categories);
+  const [dragId,setDragId]=useState<string|null>(null);
+  const [offset,setOffset]=useState(0);
+  const [saving,setSaving]=useState(false);
+  const [notice,setNotice]=useState<string|null>(null);
+  const grab=useRef({id:'',y:0,moved:false});
+  useEffect(()=>{setList(categories);},[categories]);
+  const save=async(next:CategoryOption[],message:string)=>{try{setSaving(true);await onSave(next.map(row=>({id:row.id,hidden:row.hidden})));setNotice(message);}finally{setSaving(false);}};
+  const toggle=(row:CategoryOption)=>{const next=list.map(entry=>entry.id===row.id?{...entry,hidden:!entry.hidden}:entry);setList(next);void save(next,row.hidden?`${row.label} vuelve al inicio.`:`${row.label} queda apagada. Sigue acá por si la querés de vuelta.`);};
+  const byCount=()=>{const next=[...list].sort((a,b)=>(a.kind==='uncategorized'?1:0)-(b.kind==='uncategorized'?1:0)||b.count-a.count||a.label.localeCompare(b.label));setList(next);void save(next,'Ordenadas de la más grande a la más chica.');};
+  /* Se agarra la fila y se la lleva: mientras el dedo o el mouse pasan por encima de otra, las dos
+     cambian de lugar en el momento, y al soltar se guarda solo. */
+  const startDrag=(event:React.PointerEvent<HTMLLIElement>,row:CategoryOption)=>{
+    if(event.button!==0&&event.pointerType==='mouse')return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    grab.current={id:row.id,y:event.clientY,moved:false};
+    setDragId(row.id);setOffset(0);setNotice(null);
+  };
+  const moveDrag=(event:React.PointerEvent<HTMLLIElement>)=>{
+    if(grab.current.id!==dragId||!dragId)return;
+    const over=(document.elementFromPoint(event.clientX,event.clientY) as HTMLElement|null)?.closest('[data-order-id]')?.getAttribute('data-order-id');
+    if(over&&over!==dragId){
+      grab.current.y=event.clientY;grab.current.moved=true;
+      setOffset(0);
+      setList(current=>{
+        const from=current.findIndex(entry=>entry.id===dragId);
+        const to=current.findIndex(entry=>entry.id===over);
+        if(from<0||to<0)return current;
+        const next=[...current];const [row]=next.splice(from,1);next.splice(to,0,row);
+        return next;
+      });
+      return;
+    }
+    setOffset(event.clientY-grab.current.y);
+  };
+  const endDrag=(event:React.PointerEvent<HTMLLIElement>)=>{
+    if(!dragId)return;
+    try{event.currentTarget.releasePointerCapture(event.pointerId);}catch{/* El navegador pudo haberlo soltado antes. */}
+    const moved=grab.current.moved;
+    grab.current={id:'',y:0,moved:false};
+    setDragId(null);setOffset(0);
+    if(moved)void save(list,'Listo, ese es tu orden.');
+  };
+  const visible=list.filter(row=>!row.hidden);
+  return <div className="content settings-page"><section className="settings-card">
+    <div className="settings-icon"><ArrowDownUp/></div>
+    <div className="settings-main">
+      <div className="settings-title"><div><h2>Orden de categorías</h2><p>Agarrá una y llevala a donde quieras. Se guarda sola, y vale para la tira de arriba y para las filas del inicio.</p></div><span className="root-status">Tu cuenta</span></div>
+      {notice&&<div className="update-note">{notice}</div>}
+      <ol className="category-order">
+        {list.map((row,index)=><li key={row.id} data-order-id={row.id}
+          className={`${dragId===row.id?'dragging':''} ${row.hidden?'hidden-row':''} ${row.kind==='uncategorized'?'pending':''}`}
+          style={dragId===row.id?{transform:`translateY(${offset}px)`}:undefined}
+          onPointerDown={event=>startDrag(event,row)} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag}>
+          <GripVertical size={15}/>
+          <span className="category-order-index">{index+1}</span>
+          <b>{row.label}</b>
+          <span className="category-order-count">{row.count}</span>
+          <button title={row.hidden?'Mostrar en el inicio':'Ocultar del inicio'} className={row.hidden?'':'on'} onPointerDown={event=>event.stopPropagation()} onClick={()=>toggle(row)}>{row.hidden?<EyeOff size={15}/>:<Eye size={15}/>}</button>
+        </li>)}
+      </ol>
+      {!list.length&&<p className="pending-note">Todavía no hay categorías. Van a aparecer después del próximo escaneo.</p>}
+      <div className="category-order-actions">
+        <button className="settings-rescan" disabled={saving} onClick={byCount}><ArrowDownUp/>Ordenar por cantidad</button>
+        <button className="settings-rescan" disabled={saving} onClick={()=>{setList(categories);void save([],'Orden restablecido: ciencia ficción primero.');}}><RotateCcw/>Restablecer</button>
+      </div>
+      <div className="category-order-preview">
+        <span className="eyebrow">ASÍ QUEDA EN EL INICIO</span>
+        <nav className={`category-strip ${style}`} aria-hidden="true"><span className="active"><LayoutGrid size={15}/>Todas</span>{visible.map(row=>{const Icon=categoryIcon(row);return <span key={row.id} className={`${row.kind==='uncategorized'?'pending':''} ${row.kind==='sagas'?'saga':''}`}><Icon size={15}/>{row.label}<i>{row.count}</i></span>;})}</nav>
+      </div>
+    </div>
+  </section></div>;
+}
+
+type SettingsProps={boot:Bootstrap;scan:ScanProgress;updating:boolean;updateMessage:string|null;updateVersion?:string;metadataNotice:string|null;onRescan:()=>void;onChoose:()=>void;onLogout:()=>void;onCheckUpdates:()=>void;onInstallUpdate:()=>void;onResolveIdentification:(mediaId:string,classification:ClassificationUpdate)=>Promise<void>;onApplyMetadataCandidate:(mediaId:string,candidate:MediaMetadataCandidate)=>Promise<void>;onRefreshMetadata:(mediaId:string)=>Promise<void>;categoryOptions:CategoryOption[];onSaveCategories:(preferences:CategoryPreference[])=>Promise<void>;categoryStyle:CategoryStyle;onSaveCategoryStyle:(style:CategoryStyle)=>Promise<void>;customCategories:CustomCategory[];onCreateCategory:(label:string)=>Promise<void>;onRenameCategory:(id:string,label:string)=>Promise<void>;onDeleteCategory:(id:string)=>Promise<void>};
 function RemoteSettingsPage(props:SettingsProps&{remote:RemoteStatus|null;remoteBusy:boolean;runRemoteAction:(command:string,args?:Record<string,unknown>)=>Promise<void>}){
-  const {remote,remoteBusy,runRemoteAction,onResolveIdentification,onApplyMetadataCandidate,onRefreshMetadata,...settings}=props;
+  const {remote,remoteBusy,runRemoteAction,onResolveIdentification,onApplyMetadataCandidate,onRefreshMetadata,categoryOptions,onSaveCategories,categoryStyle,onSaveCategoryStyle,customCategories,onCreateCategory,onRenameCategory,onDeleteCategory,...settings}=props;
   const copyUrl=async()=>{if(remote?.pairing?.url)await navigator.clipboard.writeText(remote.pairing.url);else if(remote?.url)await navigator.clipboard.writeText(remote.url);};
-  return <div className="cw-shared-settings"><SettingsPage {...settings}/><TmdbCreditsCard/><IdentificationReviewSettings reviews={props.boot.identificationReviews} metadataNotice={props.metadataNotice} onResolve={onResolveIdentification} onApplyCandidate={onApplyMetadataCandidate} onRetryMetadata={onRefreshMetadata}/><div className="content settings-page remote-settings-section"><section className="settings-card remote-settings-card"><div className="settings-icon"><Radio/></div><div className="settings-main">
+  return <div className="cw-shared-settings"><SettingsPage {...settings}/><CategoryStyleCard categories={categoryOptions} style={categoryStyle} onSelect={onSaveCategoryStyle}/><CustomCategoriesCard categories={customCategories} onCreate={onCreateCategory} onRename={onRenameCategory} onDelete={onDeleteCategory}/><CategoryOrderCard categories={categoryOptions} style={categoryStyle} onSave={onSaveCategories}/><TmdbCreditsCard/><IdentificationReviewSettings reviews={props.boot.identificationReviews} metadataNotice={props.metadataNotice} onResolve={onResolveIdentification} onApplyCandidate={onApplyMetadataCandidate} onRetryMetadata={onRefreshMetadata}/><div className="content settings-page remote-settings-section"><section className="settings-card remote-settings-card"><div className="settings-icon"><Radio/></div><div className="settings-main">
     <div className="settings-title"><div><h2>Control remoto</h2><p>Vinculación privada desde la misma red Wi‑Fi</p></div><span className={`root-status ${remote?.enabled?'online':''}`}>{remote?.enabled?'Activo':'Desactivado'}</span></div>
     {!remote?.assetRootReady&&<div className="remote-notice"><CircleAlert/>La interfaz móvil todavía no está compilada. El botón Activar la compilará antes de la prueba.</div>}
     {remote?.error&&<div className="remote-notice error"><CircleAlert/>{remote.error}</div>}
@@ -337,7 +628,7 @@ const detailReview=(detail:MediaDetail):IdentificationReview=>({
 });
 const reviewHasIssue=(review:IdentificationReview)=>review.identificationPending||['ambiguous','not_found','artwork_missing','pending'].includes(review.metadataStatus);
 
-function DetailModal({detail,review,close,setFlag,playMedia,openExternalMedia,onSaveMetadata,onRefreshMetadata,onApplyCandidate,onResolveIdentification,openDetail,metadataLoading}:{detail:MediaDetail;review?:IdentificationReview;close:()=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void;openExternalMedia:(id:string)=>void;onSaveMetadata:(id:string,metadata:MediaMetadataUpdate)=>Promise<void>;onRefreshMetadata:(id:string)=>Promise<void>;onApplyCandidate:(id:string,candidate:MediaMetadataCandidate)=>Promise<void>;onResolveIdentification:(mediaId:string,classification:ClassificationUpdate)=>Promise<void>;openDetail:(id:string)=>Promise<void>;metadataLoading:boolean}){
+function DetailModal({detail,review,close,setFlag,playMedia,openExternalMedia,onSaveMetadata,onRefreshMetadata,onApplyCandidate,onResolveIdentification,openDetail,metadataLoading,customCategories,onToggleCategory}:{detail:MediaDetail;review?:IdentificationReview;close:()=>void;setFlag:(i:MediaSummary,f:'favorite'|'watchlist')=>void;playMedia:(id:string)=>void;openExternalMedia:(id:string)=>void;onSaveMetadata:(id:string,metadata:MediaMetadataUpdate)=>Promise<void>;onRefreshMetadata:(id:string)=>Promise<void>;onApplyCandidate:(id:string,candidate:MediaMetadataCandidate)=>Promise<void>;onResolveIdentification:(mediaId:string,classification:ClassificationUpdate)=>Promise<void>;openDetail:(id:string)=>Promise<void>;metadataLoading:boolean;customCategories:CustomCategory[];onToggleCategory:(id:string,member:boolean)=>Promise<void>}){
   const [editing,setEditing]=useState(false);
   const [reviewOpen,setReviewOpen]=useState(false);
   const [form,setForm]=useState(()=>detailToForm(detail));
@@ -366,6 +657,7 @@ function DetailModal({detail,review,close,setFlag,playMedia,openExternalMedia,on
           <h1>{displayTitle(detail)}</h1>
           <div className="detail-meta"><span>{detail.year||'Sin año'}</span><span>{quality(detail)}</span>{detail.technical.hdrType&&<span>{detail.technical.hdrType}</span>}{detail.runtimeMs&&<span>{formatDuration(detail.runtimeMs)}</span>}{detail.manualMetadata&&<span>EDITADO</span>}<span>{metadataLabel(detail.metadataStatus)}</span></div>
           <div className="genre-pills">{detail.genres.length?detail.genres.map(genre=><span key={genre}><Tags size={12}/>{genre}</span>):<span><Tags size={12}/>Sin género</span>}</div>
+          <CustomCategoryPicker categories={customCategories} mediaId={detail.id} onToggle={onToggleCategory}/>
           <p className="overview">{detail.overview||'Todavía no hay descripción. Podés editar esta ficha y agregar la sinopsis, género, actores y portada.'}</p>
           <button className={`detail-review-button ${hasReviewIssue?'pending':''}`} onClick={()=>setReviewOpen(true)}>{hasReviewIssue?<CircleAlert/>:<ShieldCheck/>}<span><b>Revisión</b><small>{hasReviewIssue?currentReview.reason:'Identidad, portada y archivo'}</small></span></button>
           <div className="cast-block"><h3><Users size={15}/> Reparto</h3>{detail.cast.length?<p>{detail.cast.join(', ')}</p>:<p>Sin actores cargados.</p>}</div>
@@ -441,16 +733,6 @@ function CarouselRow({label,children}:{label:string;children:React.ReactNode}){
   </div>
 }
 
-function SeriesCarouselRow({title,series,openSeries}:{title:string;series:SeriesSummary[];openSeries:(series:SeriesSummary)=>void}){
-  if(!series.length)return null;
-  return <section className="media-section">
-    <div className="section-title"><h2>{title}</h2><span>{series.length}</span></div>
-    <CarouselRow label={title}>
-      {series.map(s=><SeriesCard key={s.episodeId} series={s} openSeries={openSeries}/>)}
-    </CarouselRow>
-  </section>
-}
-
 function SeriesCard({series,openSeries}:{series:SeriesSummary;openSeries:(series:SeriesSummary)=>void}){
   return <article className="media-card series-card">
     <button className="poster-detail" onClick={()=>openSeries(series)} aria-label={`Ver detalles de ${series.title}`}>
@@ -466,7 +748,7 @@ function SeriesCard({series,openSeries}:{series:SeriesSummary;openSeries:(series
   </article>
 }
 
-function SeriesDetailModal({series,close,openDetail,playMedia}:{series:SeriesSummary;close:()=>void;openDetail:(id:string)=>void;playMedia:(id:string)=>void}){
+function SeriesDetailModal({series,close,openDetail,playMedia,customCategories,onToggleCategory}:{series:SeriesSummary;close:()=>void;openDetail:(id:string)=>void;playMedia:(id:string)=>void;customCategories:CustomCategory[];onToggleCategory:(id:string,member:boolean)=>Promise<void>}){
   return <div className="modal-backdrop" onMouseDown={event=>{if(event.target===event.currentTarget)close();}}>
     <section className="series-detail-modal">
       <button className="modal-close" onClick={close}><X/></button>
@@ -474,6 +756,7 @@ function SeriesDetailModal({series,close,openDetail,playMedia}:{series:SeriesSum
         <span className="eyebrow">SERIE</span>
         <h1>{series.title}</h1>
         <p>{series.seasons} temporada{series.seasons===1?'':'s'} · {series.episodes} capítulos</p>
+        <CustomCategoryPicker categories={customCategories} seriesTitle={series.title} onToggle={onToggleCategory}/>
       </header>
       <div className="series-seasons">
         {series.seasonItems.map(season=><section key={season.seasonNumber}>

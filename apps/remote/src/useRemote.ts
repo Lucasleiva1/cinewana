@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ConnectionState, MediaDetail, MediaItem, PlayerSnapshot, RemoteCommand, SeriesItem, StoredCredentials } from './types';
+import type { CategoryItem, ConnectionState, MediaDetail, MediaItem, PlayerSnapshot, RemoteCommand, SeriesItem, StoredCredentials } from './types';
 
 const CREDENTIALS_KEY = 'cine-wana.remote-device.v1';
 const emptyPlayer: PlayerSnapshot = { active:false,positionSeconds:0,durationSeconds:0,playing:false,volume:0.8,muted:false,fullscreen:false,imageAnalyzing:false,imageAnalysisPercent:0,nextUp:null,imageSettings:[],audioTracks:[],subtitleTracks:[] };
@@ -19,6 +19,7 @@ export function useRemote() {
   const [recentlyAdded,setRecentlyAdded] = useState<MediaItem[]>([]);
   const [continueWatching,setContinueWatching] = useState<MediaItem[]>([]);
   const [series,setSeries] = useState<SeriesItem[]>([]);
+  const [categories,setCategories] = useState<CategoryItem[]>([]);
   const [error,setError] = useState<string | null>(null);
   const [pairRequestId,setPairRequestId] = useState<string | null>(null);
 
@@ -61,6 +62,7 @@ export function useRemote() {
         setRecentlyAdded((message.recentlyAdded as MediaItem[])||[]);
         setContinueWatching((message.continueWatching as MediaItem[])||[]);
         setSeries((message.series as SeriesItem[])||[]);
+        setCategories((message.categories as CategoryItem[])||[]);
       } else if(message.type==='error'){
         setError(String(message.message||'No se pudo completar la acción.'));
       } else if(message.type==='session_revoked'){
@@ -113,7 +115,7 @@ export function useRemote() {
     return response.ok?URL.createObjectURL(await response.blob()):null;
   },[]);
 
-  return {connection,player,items,movies,recentlyAdded,continueWatching,series,error,setError,pairRequestId,send,unlink,retry:connect,loadDetail,loadArtwork,loadBackdrop};
+  return {connection,player,items,movies,recentlyAdded,continueWatching,series,categories,error,setError,pairRequestId,send,unlink,retry:connect,loadDetail,loadArtwork,loadBackdrop};
 }
 
 function deviceName(){

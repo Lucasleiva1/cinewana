@@ -328,6 +328,8 @@ fn page_to_imported(
         source_language: language.to_owned(),
         poster_url: None,
         backdrop_url: None,
+        collection_id: None,
+        collection_name: None,
     })
 }
 

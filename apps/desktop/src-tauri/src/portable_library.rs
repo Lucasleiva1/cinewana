@@ -347,6 +347,9 @@ mod tests {
             metadata_candidates: Vec::<MediaMetadataCandidate>::new(),
             poster_file: Some("poster.jpg".into()),
             backdrop_file: None,
+            saga_id: Some("tmdb:8091".into()),
+            saga_title: Some("Colección Alien".into()),
+            saga_position: Some(1),
             updated_at: "2026-08-20T00:00:00Z".into(),
         }
     }

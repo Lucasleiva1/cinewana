@@ -103,6 +103,12 @@
 - Changing the library folder now preserves one root identity instead of adding a second catalog, hides inactive roots from every user-facing query, and consolidates legacy cross-disk duplicates by fingerprint while retaining progress, flags, history, manual decisions, and cached metadata
 - Every scanned title now receives a stable portable identity and a `.cinewana/items/<id>/metadata.json` package beside its video, including identification, manual corrections, TMDB state, poster, and backdrop; SQLite remains the fast rebuildable cache and original videos remain untouched
 - Home keeps recently added movies chronological while rotating the main movie shelf and featured titles once per local calendar day
+- Home groups the library into categories: a sticky name strip under the hero preview, one shelf per canonical genre, separate shelves for series, a saga shelf built from TMDB collections plus a conservative title heuristic, and a `Sin categoría` repair queue that guarantees every movie is shelved somewhere
+- Category order and visibility are chosen per account from Configuración by dragging one list that governs both the name strip and the shelves, defaulting to science fiction first and appending later genres at the end instead of reshuffling a hand-made order
+- Accounts can create their own categories and assign movies and series to them from each title's sheet; a single `Series` shelf holds every show while the per-genre series shelves start hidden instead of being removed
+- Reordering categories is a grab-and-carry gesture that reorders live and saves on release, replacing the up/down buttons
+- Every category carries its own icon, and the name strip ships in two looks selectable per account from Configuración: `gold`, the default, paints the whole row in the brand gold, while `dark` keeps neutral chips and gilds only the icons
+- The remote control mirrors the same categories in the same order, flattening sagas into a single shelf for the phone
 
 ## Pending after the functional media pass
 
@@ -119,6 +125,7 @@
 - Prepared version 0.3.6 as the signed updater release for in-player access to the shared Settings view and persistent automatic remote-control startup
 - Prepared version 0.3.7 as the signed updater release for persistent TMDB artwork and metadata, poster-first identification review, player chrome inactivity fixes, and complete movie/series/chapter counts
 - Prepared version 0.3.8 as the signed updater release for portable `.cinewana` metadata packages, individual title correction with local artwork, and one-pass image analysis per playback session
+- Prepared version 0.3.9 as the signed updater release for the category system: canonical genres, sagas, custom categories, per-account order and strip style, plus the remote-control fixes for artwork loading and the volume slider
 
 - Prepared version 0.2.1 as the installable Windows x64 test update that exposes **Configuración → Control remoto** in the desktop application
 - Prepared version 0.3.0-rc.1 as the important pre-final updater release for resilient series identification, targeted rescans, daily discovery rotation, and the local remote-control PWA

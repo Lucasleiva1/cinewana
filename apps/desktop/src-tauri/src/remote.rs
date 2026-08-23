@@ -12,8 +12,8 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{Duration, Utc};
 use cinewana_core::{
-    CatalogQuery, MediaDetail, MediaKind, MediaSummary, MediaTrack, SeriesSeasonSummary,
-    SeriesSummary,
+    CatalogQuery, CategoryKind, CategoryRow, MediaDetail, MediaKind, MediaSummary, MediaTrack,
+    SeriesSeasonSummary, SeriesSummary,
 };
 use cinewana_database::Database;
 use futures_util::{SinkExt, StreamExt};
@@ -600,6 +600,11 @@ impl RemoteService {
             .map(remote_media)
             .collect::<Vec<_>>();
         let series = home.series.iter().map(remote_series).collect::<Vec<_>>();
+        let categories = home
+            .categories
+            .iter()
+            .map(remote_category)
+            .collect::<Vec<_>>();
         Ok(json!({
             "type": "library",
             "items": items,
@@ -607,6 +612,7 @@ impl RemoteService {
             "recentlyAdded": recently_added,
             "continueWatching": continue_watching,
             "series": series,
+            "categories": categories,
         }))
     }
 
@@ -686,6 +692,27 @@ struct RemoteSeries {
     episodes: u32,
     artwork_available: bool,
     season_items: Vec<RemoteSeason>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteCategory {
+    id: String,
+    label: String,
+    kind: CategoryKind,
+    count: u32,
+    items: Vec<RemoteMedia>,
+    series: Vec<RemoteSeries>,
+    sagas: Vec<RemoteSaga>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteSaga {
+    id: String,
+    title: String,
+    artwork_available: bool,
+    items: Vec<RemoteMedia>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1114,6 +1141,29 @@ fn pairing_dto(pairing: &PairingSession, base_url: &str) -> PairingDto {
             "data:image/svg+xml;base64,{}",
             STANDARD.encode(svg.as_bytes())
         ),
+    }
+}
+
+/// Mirrors one home shelf onto the phone, so the remote lists categories in the order the account
+/// chose on the desktop.
+fn remote_category(row: &CategoryRow) -> RemoteCategory {
+    RemoteCategory {
+        id: row.id.clone(),
+        label: row.label.clone(),
+        kind: row.kind,
+        count: row.count,
+        items: row.items.iter().map(remote_media).collect(),
+        series: row.series.iter().map(remote_series).collect(),
+        sagas: row
+            .sagas
+            .iter()
+            .map(|saga| RemoteSaga {
+                id: saga.id.clone(),
+                title: saga.title.clone(),
+                artwork_available: saga.artwork_url.is_some(),
+                items: saga.items.iter().map(remote_media).collect(),
+            })
+            .collect(),
     }
 }
 

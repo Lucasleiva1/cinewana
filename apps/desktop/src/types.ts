@@ -15,10 +15,25 @@ export interface MediaSummary {
   overview?:string;
   progressPercent: number; favorite: boolean; inWatchlist: boolean; completed: boolean; offline: boolean; addedAt: string;
   artworkUrl?: string; backdropUrl?: string; previewUrl?: string; technical: MediaTechnical;
+  categories: string[]; incomplete: boolean; sagaId?: string; sagaTitle?: string; sagaPosition?: number;
 }
+export type CategoryKind = 'movies' | 'series' | 'sagas' | 'custom' | 'uncategorized';
+export interface CustomCategory { id:string; label:string; items:string[]; series:string[] }
+export interface SagaSummary { id:string; title:string; artworkUrl?:string; items:MediaSummary[] }
+export interface CategoryRow {
+  id:string; label:string; kind:CategoryKind; count:number;
+  items?:MediaSummary[]; series?:SeriesSummary[]; sagas?:SagaSummary[];
+}
+export interface CategoryOption { id:string; label:string; kind:CategoryKind; count:number; hidden:boolean }
+export interface CategoryPreference { id:string; hidden:boolean }
 export interface SeriesSeasonSummary { seasonNumber:number; title:string; episodes:MediaSummary[] }
 export interface SeriesSummary { episodeId: string; title: string; seasons: number; episodes: number; artworkUrl?: string; latestAddedAt: string; seasonItems:SeriesSeasonSummary[] }
-export interface HomeDto { heroes: MediaSummary[]; continueWatching: MediaSummary[]; recentlyAdded: MediaSummary[]; movies: MediaSummary[]; series: SeriesSummary[]; favorites: MediaSummary[] }
+export interface HomeDto {
+  heroes: MediaSummary[]; continueWatching: MediaSummary[]; recentlyAdded: MediaSummary[]; movies: MediaSummary[];
+  series: SeriesSummary[]; favorites: MediaSummary[]; categories: CategoryRow[]; categorySettings: CategoryOption[];
+  categoryStyle: CategoryStyle; customCategories: CustomCategory[];
+}
+export type CategoryStyle = 'gold' | 'dark';
 export interface LibraryRoot { id:string; displayName:string; enabled:boolean; recursive:boolean; watchEnabled:boolean; status:RootStatus; lastScanAt?:string; disconnectedCount:number; localPath?:string }
 export interface Account { id:string; name:string }
 export interface ScanProgress { jobId?:string; running:boolean; cancelRequested:boolean; found:number; processed:number; skipped:number; errors:number; currentFile?:string; percent:number; message?:string }

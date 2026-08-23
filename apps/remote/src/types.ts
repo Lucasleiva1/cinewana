@@ -32,6 +32,13 @@ export interface SeriesItem {
   episodeId: string; title: string; seasons: number; episodes: number; artworkAvailable: boolean; seasonItems: SeriesSeason[];
 }
 
+export type CategoryKind = 'movies' | 'series' | 'sagas' | 'custom' | 'uncategorized';
+export interface SagaItem { id: string; title: string; artworkAvailable: boolean; items: MediaItem[] }
+export interface CategoryItem {
+  id: string; label: string; kind: CategoryKind; count: number;
+  items: MediaItem[]; series: SeriesItem[]; sagas: SagaItem[];
+}
+
 export type RemoteCommand =
   | { type: 'player_toggle' }
   | { type: 'player_seek_by'; seconds: number }

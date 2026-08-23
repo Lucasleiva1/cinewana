@@ -3,9 +3,10 @@ mod portable_library;
 mod remote;
 
 use cinewana_core::{
-    AccountDto, BootstrapDto, CatalogQuery, ClassificationUpdate, DEFAULT_LIBRARY_ROOT,
-    ImageAnalysis, ImageAnalysisProgress, MediaDetail, MediaKind, MediaMetadataCandidate,
-    MediaMetadataUpdate, MediaSummary, PlayerCommand, PlayerState, ScanProgress,
+    AccountDto, BootstrapDto, CatalogQuery, CategoryPreference, ClassificationUpdate,
+    DEFAULT_LIBRARY_ROOT, HomeDto, ImageAnalysis, ImageAnalysisProgress, MediaDetail, MediaKind,
+    MediaMetadataCandidate, MediaMetadataUpdate, MediaSummary, PlayerCommand, PlayerState,
+    ScanProgress,
 };
 use cinewana_database::{Database, MetadataImportTarget};
 use cinewana_metadata::{MetadataSearchOutcome, TmdbMetadataClient};
@@ -101,6 +102,93 @@ fn catalog(
         .db
         .catalog(Some(&account_id), &query.unwrap_or_default())
         .map_err(error_string)
+}
+
+/// Saves the shelf order and visibility chosen by the signed-in account.
+///
+/// The home screen and the remote read the same preference, so one drag reorders both.
+#[tauri::command]
+fn set_category_order(
+    preferences: Vec<CategoryPreference>,
+    state: State<'_, AppServices>,
+) -> Result<HomeDto, String> {
+    let account_id = state.db.require_active_account_id().map_err(error_string)?;
+    state
+        .db
+        .set_category_preferences(Some(&account_id), &preferences)
+        .map_err(error_string)?;
+    state.db.home(Some(&account_id)).map_err(error_string)
+}
+
+/// Creates a shelf the account fills by hand.
+#[tauri::command]
+fn create_category(label: String, state: State<'_, AppServices>) -> Result<HomeDto, String> {
+    let account_id = state.db.require_active_account_id().map_err(error_string)?;
+    state
+        .db
+        .create_custom_category(Some(&account_id), &label)
+        .map_err(error_string)?;
+    state.db.home(Some(&account_id)).map_err(error_string)
+}
+
+/// Renames a shelf the account created.
+#[tauri::command]
+fn rename_category(
+    id: String,
+    label: String,
+    state: State<'_, AppServices>,
+) -> Result<HomeDto, String> {
+    let account_id = state.db.require_active_account_id().map_err(error_string)?;
+    state
+        .db
+        .rename_custom_category(Some(&account_id), &id, &label)
+        .map_err(error_string)?;
+    state.db.home(Some(&account_id)).map_err(error_string)
+}
+
+/// Removes a shelf the account created without touching the titles it held.
+#[tauri::command]
+fn delete_category(id: String, state: State<'_, AppServices>) -> Result<HomeDto, String> {
+    let account_id = state.db.require_active_account_id().map_err(error_string)?;
+    state
+        .db
+        .delete_custom_category(Some(&account_id), &id)
+        .map_err(error_string)?;
+    state.db.home(Some(&account_id)).map_err(error_string)
+}
+
+/// Adds or removes one title from a shelf the account created.
+#[tauri::command]
+fn set_category_member(
+    id: String,
+    media_id: Option<String>,
+    series_title: Option<String>,
+    member: bool,
+    state: State<'_, AppServices>,
+) -> Result<HomeDto, String> {
+    let account_id = state.db.require_active_account_id().map_err(error_string)?;
+    state
+        .db
+        .set_custom_category_member(
+            Some(&account_id),
+            &id,
+            media_id.as_deref(),
+            series_title.as_deref(),
+            member,
+        )
+        .map_err(error_string)?;
+    state.db.home(Some(&account_id)).map_err(error_string)
+}
+
+/// Saves which of the two category-strip looks the signed-in account prefers.
+#[tauri::command]
+fn set_category_style(style: String, state: State<'_, AppServices>) -> Result<HomeDto, String> {
+    let account_id = state.db.require_active_account_id().map_err(error_string)?;
+    state
+        .db
+        .set_category_style(Some(&account_id), &style)
+        .map_err(error_string)?;
+    state.db.home(Some(&account_id)).map_err(error_string)
 }
 
 #[tauri::command]
@@ -1156,6 +1244,12 @@ pub fn run() {
             login_account,
             logout_account,
             catalog,
+            set_category_order,
+            set_category_style,
+            create_category,
+            rename_category,
+            delete_category,
+            set_category_member,
             media_detail,
             resolve_identification,
             next_movie,

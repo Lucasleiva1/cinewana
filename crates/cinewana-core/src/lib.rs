@@ -1,3 +1,7 @@
+pub mod genres;
+pub mod sagas;
+
+use genres::SERIES_PREFIX;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -78,6 +82,19 @@ pub struct MediaSummary {
     pub backdrop_url: Option<String>,
     pub preview_url: Option<String>,
     pub technical: MediaTechnical,
+    /// Canonical categories this title is shelved under. Never empty for a shelved title: a title
+    /// with no usable genre carries [`genres::UNCATEGORIZED_LABEL`].
+    #[serde(default)]
+    pub categories: Vec<String>,
+    /// Whether the stored sheet is missing a genre or a synopsis and needs manual review.
+    #[serde(default)]
+    pub incomplete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saga_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saga_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saga_position: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +170,11 @@ pub struct ImportedMediaMetadata {
     pub source_language: String,
     pub poster_url: Option<String>,
     pub backdrop_url: Option<String>,
+    /// Provider collection the title belongs to, when the provider knows of one.
+    #[serde(default)]
+    pub collection_id: Option<String>,
+    #[serde(default)]
+    pub collection_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -183,6 +205,13 @@ pub struct PortableMediaMetadata {
     pub metadata_candidates: Vec<MediaMetadataCandidate>,
     pub poster_file: Option<String>,
     pub backdrop_file: Option<String>,
+    /// Collection this title belongs to, so sagas survive moving the drive to another computer.
+    #[serde(default)]
+    pub saga_id: Option<String>,
+    #[serde(default)]
+    pub saga_title: Option<String>,
+    #[serde(default)]
+    pub saga_position: Option<i32>,
     pub updated_at: String,
 }
 
@@ -234,6 +263,122 @@ pub struct HomeDto {
     pub movies: Vec<MediaSummary>,
     pub series: Vec<SeriesSummary>,
     pub favorites: Vec<MediaSummary>,
+    /// Shelves in the order this account chose, with hidden shelves already removed.
+    #[serde(default)]
+    pub categories: Vec<CategoryRow>,
+    /// Every shelf known to the library, including hidden ones, for the reorder screen.
+    #[serde(default)]
+    pub category_settings: Vec<CategoryOption>,
+    /// Look of the category strip chosen by this account: `gold` or `dark`.
+    #[serde(default)]
+    pub category_style: String,
+    /// Shelves the account created, with their membership, for the assignment controls.
+    #[serde(default)]
+    pub custom_categories: Vec<CustomCategory>,
+}
+
+/// The two looks available for the category strip.
+pub const CATEGORY_STYLES: &[(&str, &str)] = &[("gold", "Dorada"), ("dark", "Sobria")];
+/// Look used until the account picks another one.
+pub const DEFAULT_CATEGORY_STYLE: &str = "gold";
+
+/// What a shelf holds, so the interface knows which card to draw.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CategoryKind {
+    /// Movies of one genre.
+    Movies,
+    /// Series, either every show or the ones of one genre.
+    Series,
+    /// Movie collections.
+    Sagas,
+    /// A shelf the account created and fills by hand.
+    Custom,
+    /// Titles missing a genre or a synopsis.
+    Uncategorized,
+}
+
+/// A shelf the account created, holding whatever titles it assigned by hand.
+///
+/// Movies are referenced by media id. Series are referenced by title because a show's identity in
+/// the catalog is its name: the episode standing in for it changes whenever a newer one is added.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomCategory {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub items: Vec<String>,
+    #[serde(default)]
+    pub series: Vec<String>,
+}
+
+/// Identifier of the shelf that holds every series regardless of genre.
+pub const ALL_SERIES_ID: &str = "series";
+/// Visible label for [`ALL_SERIES_ID`].
+pub const ALL_SERIES_LABEL: &str = "Series";
+/// Prefix marking a shelf the account created.
+pub const CUSTOM_PREFIX: &str = "custom:";
+
+/// One shelf of the home screen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryRow {
+    pub id: String,
+    pub label: String,
+    pub kind: CategoryKind,
+    pub count: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<MediaSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub series: Vec<SeriesSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sagas: Vec<SagaSummary>,
+}
+
+/// A shelf as listed on the reorder screen, whether or not it is currently visible.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryOption {
+    pub id: String,
+    pub label: String,
+    pub kind: CategoryKind,
+    pub count: u32,
+    pub hidden: bool,
+}
+
+/// One saved shelf preference. Order inside the vector is the order on screen.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryPreference {
+    pub id: String,
+    #[serde(default)]
+    pub hidden: bool,
+}
+
+/// A movie collection: `Chucky 1`, `Chucky 2`, `Chucky 3`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SagaSummary {
+    pub id: String,
+    pub title: String,
+    pub artwork_url: Option<String>,
+    /// Members ordered by their position inside the collection.
+    pub items: Vec<MediaSummary>,
+}
+
+impl CategoryRow {
+    /// Identifier of the shelf holding movies of `genre`.
+    pub fn movies_id(genre: &str) -> String {
+        genres::genre_slug(genre)
+            .map(str::to_owned)
+            .unwrap_or_else(|| genres::fold(genre).replace(' ', "-"))
+    }
+
+    /// Identifier of the shelf holding series of `genre`.
+    pub fn series_id(genre: &str) -> String {
+        format!("{SERIES_PREFIX}{}", Self::movies_id(genre))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

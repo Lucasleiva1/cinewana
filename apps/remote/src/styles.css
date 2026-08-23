@@ -11,3 +11,19 @@ main{padding:0 14px}.now-playing{padding:17px 16px 18px;border:1px solid #363636
 
 /* Keep the two-color wordmark visually joined as CINEWANA. */
 .brand{gap:0;white-space:nowrap}
+
+/* Categories arrive already ordered by the desktop; the strip jumps to the shelf. */
+.category-strip { margin:4px 0 14px; padding:0 16px 4px; display:flex; gap:7px; overflow-x:auto; scrollbar-width:none; }
+.category-strip::-webkit-scrollbar { display:none; }
+.category-strip a { flex:0 0 auto; padding:7px 13px; border:1px solid #c8a46a35; border-radius:15px; background:#c8a46a12; color:#e5c995; font-size:12px; text-decoration:none; white-space:nowrap; }
+.category-strip a:active { background:#c8a46a26; }
+.category-strip a.pending { border-color:#b1122660; background:#b1122614; color:#e8a3ac; }
+.category-anchor { scroll-margin-top:12px; }
+
+/* The player panel keeps one height whether or not something is playing, and the quick controls
+   keep two rows of room. Track and image controls arrive a moment after the first snapshot, and
+   letting the box grow underneath pushed the volume slider away from the finger already on it. */
+.now-playing{min-height:428px}
+.quick-controls{min-height:108px;align-content:start}
+.category-strip{-webkit-overflow-scrolling:touch;scroll-snap-type:x proximity}
+.category-strip a{scroll-snap-align:start}

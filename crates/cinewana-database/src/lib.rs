@@ -1,10 +1,17 @@
 use anyhow::{Context, Result};
 use chrono::{Datelike, Local, Utc};
 use cinewana_core::{
-    AccountDto, CatalogQuery, ClassificationUpdate, HomeDto, IdentificationReview,
-    ImportedMediaMetadata, LibraryRootDto, MediaDetail, MediaKind, MediaMetadataCandidate,
-    MediaMetadataUpdate, MediaSummary, MediaTechnical, MediaTrack, ParsedMediaName,
-    PortableMediaMetadata, RootStatus, SeriesSeasonSummary, SeriesSummary,
+    AccountDto, CatalogQuery, CategoryKind, CategoryOption, CategoryPreference, CategoryRow,
+    ClassificationUpdate, HomeDto, IdentificationReview, ImportedMediaMetadata, LibraryRootDto,
+    MediaDetail, MediaKind, MediaMetadataCandidate, MediaMetadataUpdate, MediaSummary,
+    ALL_SERIES_ID, ALL_SERIES_LABEL, CATEGORY_STYLES, CUSTOM_PREFIX, CustomCategory,
+    DEFAULT_CATEGORY_STYLE, MediaTechnical, MediaTrack, ParsedMediaName, PortableMediaMetadata,
+    RootStatus, SagaSummary, SeriesSeasonSummary, SeriesSummary,
+    genres::{
+        SAGAS_ID, SAGAS_LABEL, SERIES_PREFIX, UNCATEGORIZED_ID, UNCATEGORIZED_LABEL,
+        canonical_genres,
+    },
+    sagas::group_saga_candidates,
 };
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -256,6 +263,9 @@ impl Database {
         self.ensure_media_column("review_reason", "TEXT", 12)?;
         self.ensure_media_column("manual_classification", "INTEGER NOT NULL DEFAULT 0", 13)?;
         self.ensure_media_column("portable_id", "TEXT", 14)?;
+        self.ensure_media_column("saga_id", "TEXT", 15)?;
+        self.ensure_media_column("saga_title", "TEXT", 16)?;
+        self.ensure_media_column("saga_position", "INTEGER", 17)?;
         self.connection.lock().execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_media_portable_id ON media_items(portable_id) WHERE portable_id IS NOT NULL",
             [],
@@ -1002,7 +1012,8 @@ impl Database {
                         m.season_number,m.episode_number,m.identification_source,m.needs_review,
                         m.review_reason,m.manual_classification,m.manual_metadata,m.metadata_status,
                         m.metadata_source_url,m.metadata_imported_at,m.metadata_candidates_json,
-                        m.poster_cache_key,m.backdrop_cache_key,m.updated_at
+                        m.poster_cache_key,m.backdrop_cache_key,m.updated_at,
+                        m.saga_id,m.saga_title,m.saga_position
                  FROM media_items m JOIN media_files f ON f.media_item_id=m.id
                  WHERE m.id=?1 AND f.offline=0 LIMIT 1",
                 [media_id],
@@ -1043,6 +1054,9 @@ impl Database {
                                 .unwrap_or_default(),
                             poster_file: None,
                             backdrop_file: None,
+                            saga_id: row.get(26)?,
+                            saga_title: row.get(27)?,
+                            saga_position: row.get(28)?,
                             updated_at: row.get(25)?,
                         },
                         video_path: row.get(1)?,
@@ -1093,7 +1107,8 @@ impl Database {
              metadata_source_url=?17,metadata_imported_at=?18,
              metadata_candidates_json=?19,metadata_json_path=?20,
              poster_cache_key=COALESCE(?21,poster_cache_key),
-             backdrop_cache_key=COALESCE(?22,backdrop_cache_key),updated_at=?23
+             backdrop_cache_key=COALESCE(?22,backdrop_cache_key),updated_at=?23,
+             saga_id=?25,saga_title=?26,saga_position=?27
              WHERE id=?24",
             params![
                 metadata.portable_id,
@@ -1119,7 +1134,10 @@ impl Database {
                 poster_path,
                 backdrop_path,
                 metadata.updated_at,
-                media_id
+                media_id,
+                metadata.saga_id,
+                metadata.saga_title,
+                metadata.saga_position
             ],
         )?;
         transaction.execute("DELETE FROM episodes WHERE media_item_id=?1", [media_id])?;
@@ -1211,7 +1229,7 @@ impl Database {
                 entry.2 = item.artwork_url.clone();
             }
         }
-        let series = series_map
+        let series: Vec<SeriesSummary> = series_map
             .into_iter()
             .map(
                 |(title, (mut seasons, latest_added_at, artwork_url, episode_id))| {
@@ -1239,13 +1257,22 @@ impl Database {
                 },
             )
             .collect();
+        let sagas = build_sagas(&movies);
+        let preferences = self.category_preferences(account_id)?;
+        let custom = self.custom_categories(account_id)?;
+        let (categories, category_settings) =
+            build_categories(&movies, &series, &sagas, &preferences, &custom);
         Ok(HomeDto {
+            category_style: self.category_style(account_id)?,
+            custom_categories: custom,
             heroes,
             continue_watching,
             recently_added,
             movies,
             series,
             favorites,
+            categories,
+            category_settings,
         })
     }
 
@@ -1575,6 +1602,7 @@ impl Database {
              metadata_status='imported',metadata_source_url=?8,metadata_imported_at=?9,metadata_checked_at=?9,
              metadata_candidates_json='[]',metadata_json_path=?10,
              manual_classification=CASE WHEN ?11=1 THEN 1 ELSE manual_classification END,
+             saga_id=COALESCE(?13,saga_id),saga_title=COALESCE(?14,saga_title),
              updated_at=?9 WHERE id=?12",
             params![
                 metadata.title,
@@ -1588,7 +1616,9 @@ impl Database {
                 now,
                 metadata_json_path,
                 preserve_title,
-                media_id
+                media_id,
+                metadata.collection_id,
+                metadata.collection_name
             ],
         )?;
         Ok(())
@@ -1733,6 +1763,192 @@ impl Database {
         Ok(())
     }
 
+    /// Reads the shelf order saved by an account.
+    ///
+    /// Preferences are per account so two people sharing the computer keep their own arrangement.
+    pub fn category_preferences(
+        &self,
+        account_id: Option<&str>,
+    ) -> Result<Vec<CategoryPreference>> {
+        let stored: Option<String> = self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT value_json FROM settings WHERE key=?1",
+                [category_order_key(account_id)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(stored
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<Vec<CategoryPreference>>(value).ok())
+            .unwrap_or_default())
+    }
+
+    /// Reads the look of the category strip chosen by an account.
+    pub fn category_style(&self, account_id: Option<&str>) -> Result<String> {
+        let stored: Option<String> = self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT value_json FROM settings WHERE key=?1",
+                [category_style_key(account_id)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let stored = stored
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<String>(value).ok())
+            .filter(|value| CATEGORY_STYLES.iter().any(|(id, _)| id == value));
+        Ok(stored.unwrap_or_else(|| DEFAULT_CATEGORY_STYLE.to_owned()))
+    }
+
+    /// Saves the look of the category strip, rejecting anything outside the published catalog.
+    pub fn set_category_style(&self, account_id: Option<&str>, style: &str) -> Result<()> {
+        if !CATEGORY_STYLES.iter().any(|(id, _)| *id == style) {
+            anyhow::bail!("Ese estilo de categorías no existe");
+        }
+        let value = serde_json::to_string(style)?;
+        let now = Utc::now().to_rfc3339();
+        self.connection.lock().execute(
+            "INSERT INTO settings(key,value_json,updated_at) VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
+            params![category_style_key(account_id), value, now],
+        )?;
+        Ok(())
+    }
+
+    /// Reads the shelves an account created by hand.
+    pub fn custom_categories(&self, account_id: Option<&str>) -> Result<Vec<CustomCategory>> {
+        let stored: Option<String> = self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT value_json FROM settings WHERE key=?1",
+                [custom_categories_key(account_id)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(stored
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<Vec<CustomCategory>>(value).ok())
+            .unwrap_or_default())
+    }
+
+    fn store_custom_categories(
+        &self,
+        account_id: Option<&str>,
+        categories: &[CustomCategory],
+    ) -> Result<()> {
+        let value = serde_json::to_string(categories)?;
+        let now = Utc::now().to_rfc3339();
+        self.connection.lock().execute(
+            "INSERT INTO settings(key,value_json,updated_at) VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
+            params![custom_categories_key(account_id), value, now],
+        )?;
+        Ok(())
+    }
+
+    /// Creates an empty shelf and returns its identifier.
+    pub fn create_custom_category(&self, account_id: Option<&str>, label: &str) -> Result<String> {
+        let label = label.trim();
+        if label.is_empty() {
+            anyhow::bail!("La categoría necesita un nombre");
+        }
+        if label.chars().count() > 40 {
+            anyhow::bail!("El nombre de la categoría es demasiado largo");
+        }
+        let mut categories = self.custom_categories(account_id)?;
+        if categories
+            .iter()
+            .any(|category| category.label.to_lowercase() == label.to_lowercase())
+        {
+            anyhow::bail!("Ya existe una categoría con ese nombre");
+        }
+        let id = format!("{CUSTOM_PREFIX}{}", Uuid::new_v4());
+        categories.push(CustomCategory {
+            id: id.clone(),
+            label: label.to_owned(),
+            items: Vec::new(),
+            series: Vec::new(),
+        });
+        self.store_custom_categories(account_id, &categories)?;
+        Ok(id)
+    }
+
+    /// Removes a shelf the account created. The titles themselves are untouched.
+    pub fn delete_custom_category(&self, account_id: Option<&str>, id: &str) -> Result<()> {
+        let mut categories = self.custom_categories(account_id)?;
+        categories.retain(|category| category.id != id);
+        self.store_custom_categories(account_id, &categories)?;
+        let mut preferences = self.category_preferences(account_id)?;
+        preferences.retain(|preference| preference.id != id);
+        self.set_category_preferences(account_id, &preferences)
+    }
+
+    /// Renames a shelf the account created.
+    pub fn rename_custom_category(
+        &self,
+        account_id: Option<&str>,
+        id: &str,
+        label: &str,
+    ) -> Result<()> {
+        let label = label.trim();
+        if label.is_empty() {
+            anyhow::bail!("La categoría necesita un nombre");
+        }
+        let mut categories = self.custom_categories(account_id)?;
+        let Some(category) = categories.iter_mut().find(|category| category.id == id) else {
+            anyhow::bail!("Esa categoría ya no existe");
+        };
+        category.label = label.to_owned();
+        self.store_custom_categories(account_id, &categories)
+    }
+
+    /// Adds or removes one title from a shelf the account created.
+    ///
+    /// `member` decides the direction, so the same call serves the toggle drawn on the title sheet.
+    pub fn set_custom_category_member(
+        &self,
+        account_id: Option<&str>,
+        id: &str,
+        media_id: Option<&str>,
+        series_title: Option<&str>,
+        member: bool,
+    ) -> Result<()> {
+        let mut categories = self.custom_categories(account_id)?;
+        let Some(category) = categories.iter_mut().find(|category| category.id == id) else {
+            anyhow::bail!("Esa categoría ya no existe");
+        };
+        if let Some(media_id) = media_id.map(str::trim).filter(|value| !value.is_empty()) {
+            category.items.retain(|value| value != media_id);
+            if member {
+                category.items.push(media_id.to_owned());
+            }
+        }
+        if let Some(series_title) = series_title.map(str::trim).filter(|value| !value.is_empty()) {
+            category.series.retain(|value| value != series_title);
+            if member {
+                category.series.push(series_title.to_owned());
+            }
+        }
+        self.store_custom_categories(account_id, &categories)
+    }
+
+    /// Saves the shelf order chosen by an account.
+    pub fn set_category_preferences(
+        &self,
+        account_id: Option<&str>,
+        preferences: &[CategoryPreference],
+    ) -> Result<()> {
+        let value = serde_json::to_string(preferences)?;
+        let now = Utc::now().to_rfc3339();
+        self.connection.lock().execute(
+            "INSERT INTO settings(key,value_json,updated_at) VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
+            params![category_order_key(account_id), value, now],
+        )?;
+        Ok(())
+    }
+
     pub fn backup_to(&self, target: &Path) -> Result<()> {
         let escaped = target.to_string_lossy().replace('\'', "''");
         self.connection
@@ -1746,7 +1962,8 @@ const MEDIA_SELECT: &str = r#"
 SELECT m.id,m.kind,m.title,m.year,m.series_title,m.season_number,m.episode_number,m.overview,
        COALESCE(p.position_ms,0),COALESCE(p.duration_ms,COALESCE(m.runtime_ms,f.duration_ms,0)),COALESCE(p.completed,0),
        COALESCE(u.favorite,0),COALESCE(u.in_watchlist,0),f.offline,m.created_at,m.poster_cache_key,m.backdrop_cache_key,m.preview_cache_key,
-       COALESCE(m.runtime_ms,f.duration_ms),f.width,f.height,f.container,f.video_codec,f.audio_codec,f.hdr_type
+       COALESCE(m.runtime_ms,f.duration_ms),f.width,f.height,f.container,f.video_codec,f.audio_codec,f.hdr_type,
+       m.genres_json,m.saga_id,m.saga_title,m.saga_position
 FROM media_items m JOIN media_files f ON f.media_item_id=m.id
 JOIN library_roots r ON r.id=f.library_root_id
 LEFT JOIN account_watch_progress p ON p.media_item_id=m.id AND p.account_id=?1
@@ -1758,7 +1975,8 @@ const MEDIA_SELECT_BY_ID: &str = r#"
 SELECT m.id,m.kind,m.title,m.year,m.series_title,m.season_number,m.episode_number,m.overview,
        COALESCE(p.position_ms,0),COALESCE(p.duration_ms,COALESCE(m.runtime_ms,f.duration_ms,0)),COALESCE(p.completed,0),
        COALESCE(u.favorite,0),COALESCE(u.in_watchlist,0),f.offline,m.created_at,m.poster_cache_key,m.backdrop_cache_key,m.preview_cache_key,
-       COALESCE(m.runtime_ms,f.duration_ms),f.width,f.height,f.container,f.video_codec,f.audio_codec,f.hdr_type
+       COALESCE(m.runtime_ms,f.duration_ms),f.width,f.height,f.container,f.video_codec,f.audio_codec,f.hdr_type,
+       m.genres_json,m.saga_id,m.saga_title,m.saga_position
 FROM media_items m JOIN media_files f ON f.media_item_id=m.id
 JOIN library_roots r ON r.id=f.library_root_id
 LEFT JOIN account_watch_progress p ON p.media_item_id=m.id AND p.account_id=?1
@@ -2110,10 +2328,314 @@ fn to_hex(bytes: &[u8]) -> String {
     output
 }
 
+/// Settings key holding the shelf order of one account.
+fn category_order_key(account_id: Option<&str>) -> String {
+    format!("category_order:{}", account_id.unwrap_or_default())
+}
+
+/// Settings key holding the category-strip look of one account.
+fn category_style_key(account_id: Option<&str>) -> String {
+    format!("category_style:{}", account_id.unwrap_or_default())
+}
+
+/// Settings key holding the shelves one account created by hand.
+fn custom_categories_key(account_id: Option<&str>) -> String {
+    format!("custom_categories:{}", account_id.unwrap_or_default())
+}
+
+/// Shelves that exist but stay off until the account turns them on.
+///
+/// The per-genre series shelves split a handful of shows across several rows, so the single
+/// `Series` shelf is the one that ships visible. Nothing is deleted: they are listed in
+/// Configuración with the eye closed, ready to be switched back on.
+fn hidden_by_default(row: &CategoryRow) -> bool {
+    row.id.starts_with(SERIES_PREFIX)
+}
+
+/// Guarantees a title is shelved somewhere.
+///
+/// A sheet missing its genre or its synopsis joins the uncategorized shelf, which doubles as the
+/// repair queue. Titles that do have genres keep them and gain the extra shelf, so nothing is ever
+/// pulled out of the genre it belongs to just because its synopsis is blank.
+fn shelve(mut categories: Vec<String>, incomplete: bool) -> Vec<String> {
+    if incomplete && !categories.iter().any(|value| value == UNCATEGORIZED_LABEL) {
+        categories.push(UNCATEGORIZED_LABEL.to_owned());
+    }
+    categories
+}
+
+/// Canonical genres of a series, taken as the union of the genres of its episodes.
+///
+/// A series is one shelf entry, so a single season identified by TMDB is enough to classify the
+/// whole show even when the remaining episodes were never matched.
+fn series_genres(series: &SeriesSummary) -> Vec<String> {
+    let mut genres: Vec<String> = Vec::new();
+    for season in &series.season_items {
+        for episode in &season.episodes {
+            for genre in &episode.categories {
+                if genre != UNCATEGORIZED_LABEL && !genres.contains(genre) {
+                    genres.push(genre.clone());
+                }
+            }
+        }
+    }
+    genres
+}
+
+/// Builds the movie collections.
+///
+/// Collections imported from TMDB win; the title heuristic only runs over what is left, so an
+/// identified movie is never dragged into a guessed saga.
+fn build_sagas(movies: &[MediaSummary]) -> Vec<SagaSummary> {
+    let mut sagas: Vec<SagaSummary> = Vec::new();
+    for movie in movies.iter().filter(|movie| movie.saga_id.is_some()) {
+        let Some(id) = movie.saga_id.clone() else {
+            continue;
+        };
+        match sagas.iter_mut().find(|saga| saga.id == id) {
+            Some(saga) => saga.items.push(movie.clone()),
+            None => sagas.push(SagaSummary {
+                id,
+                title: movie
+                    .saga_title
+                    .clone()
+                    .unwrap_or_else(|| movie.title.clone()),
+                artwork_url: movie.artwork_url.clone(),
+                items: vec![movie.clone()],
+            }),
+        }
+    }
+    let orphans = movies
+        .iter()
+        .filter(|movie| movie.saga_id.is_none())
+        .collect::<Vec<_>>();
+    let titles = orphans
+        .iter()
+        .map(|movie| movie.title.clone())
+        .collect::<Vec<_>>();
+    for candidate in group_saga_candidates(&titles) {
+        let items = candidate
+            .members
+            .iter()
+            .filter_map(|(index, part)| {
+                orphans.get(*index).map(|movie| {
+                    let mut movie = (*movie).clone();
+                    movie.saga_position = Some(*part as i32);
+                    movie
+                })
+            })
+            .collect::<Vec<_>>();
+        if items.len() < 2 {
+            continue;
+        }
+        sagas.push(SagaSummary {
+            id: format!("auto:{}", candidate.key),
+            title: candidate.label,
+            artwork_url: items.first().and_then(|movie| movie.artwork_url.clone()),
+            items,
+        });
+    }
+    sagas.retain(|saga| saga.items.len() > 1);
+    for saga in &mut sagas {
+        saga.items.sort_by(|left, right| {
+            left.saga_position
+                .unwrap_or(i32::MAX)
+                .cmp(&right.saga_position.unwrap_or(i32::MAX))
+                .then(left.year.cmp(&right.year))
+                .then(left.title.cmp(&right.title))
+        });
+        if saga.artwork_url.is_none() {
+            saga.artwork_url = saga.items.iter().find_map(|movie| movie.artwork_url.clone());
+        }
+    }
+    sagas.sort_by(|left, right| {
+        right
+            .items
+            .len()
+            .cmp(&left.items.len())
+            .then(left.title.to_lowercase().cmp(&right.title.to_lowercase()))
+    });
+    sagas
+}
+
+/// Assembles every shelf and applies the account's saved order.
+///
+/// Returns the visible shelves plus the full roster used by the reorder screen, hidden ones
+/// included.
+fn build_categories(
+    movies: &[MediaSummary],
+    series: &[SeriesSummary],
+    sagas: &[SagaSummary],
+    preferences: &[CategoryPreference],
+    custom: &[CustomCategory],
+) -> (Vec<CategoryRow>, Vec<CategoryOption>) {
+    let mut rows: Vec<CategoryRow> = Vec::new();
+    for category in custom {
+        let items = movies
+            .iter()
+            .filter(|movie| category.items.iter().any(|id| id == &movie.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let shows = series
+            .iter()
+            .filter(|show| category.series.iter().any(|title| title == &show.title))
+            .cloned()
+            .collect::<Vec<_>>();
+        rows.push(CategoryRow {
+            id: category.id.clone(),
+            label: category.label.clone(),
+            kind: CategoryKind::Custom,
+            count: (items.len() + shows.len()) as u32,
+            items,
+            series: shows,
+            sagas: Vec::new(),
+        });
+    }
+    if !series.is_empty() {
+        rows.push(CategoryRow {
+            id: ALL_SERIES_ID.to_owned(),
+            label: ALL_SERIES_LABEL.to_owned(),
+            kind: CategoryKind::Series,
+            count: series.len() as u32,
+            items: Vec::new(),
+            series: series.to_vec(),
+            sagas: Vec::new(),
+        });
+    }
+    for (slug, label) in cinewana_core::genres::CANONICAL_GENRES {
+        let items = movies
+            .iter()
+            .filter(|movie| movie.categories.iter().any(|genre| genre == label))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !items.is_empty() {
+            rows.push(CategoryRow {
+                id: (*slug).to_owned(),
+                label: (*label).to_owned(),
+                kind: CategoryKind::Movies,
+                count: items.len() as u32,
+                items,
+                series: Vec::new(),
+                sagas: Vec::new(),
+            });
+        }
+        let shows = series
+            .iter()
+            .filter(|show| series_genres(show).iter().any(|genre| genre == label))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !shows.is_empty() {
+            rows.push(CategoryRow {
+                id: CategoryRow::series_id(label),
+                label: format!("Series de {}", label.to_lowercase()),
+                kind: CategoryKind::Series,
+                count: shows.len() as u32,
+                items: Vec::new(),
+                series: shows,
+                sagas: Vec::new(),
+            });
+        }
+    }
+    if !sagas.is_empty() {
+        rows.push(CategoryRow {
+            id: SAGAS_ID.to_owned(),
+            label: SAGAS_LABEL.to_owned(),
+            kind: CategoryKind::Sagas,
+            count: sagas.len() as u32,
+            items: Vec::new(),
+            series: Vec::new(),
+            sagas: sagas.to_vec(),
+        });
+    }
+    let pending_movies = movies
+        .iter()
+        .filter(|movie| movie.incomplete)
+        .cloned()
+        .collect::<Vec<_>>();
+    let pending_series = series
+        .iter()
+        .filter(|show| series_genres(show).is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    if !pending_movies.is_empty() || !pending_series.is_empty() {
+        rows.push(CategoryRow {
+            id: UNCATEGORIZED_ID.to_owned(),
+            label: UNCATEGORIZED_LABEL.to_owned(),
+            kind: CategoryKind::Uncategorized,
+            count: (pending_movies.len() + pending_series.len()) as u32,
+            items: pending_movies,
+            series: pending_series,
+            sagas: Vec::new(),
+        });
+    }
+    sort_categories(&mut rows, preferences);
+    let settings = rows
+        .iter()
+        .map(|row| CategoryOption {
+            id: row.id.clone(),
+            label: row.label.clone(),
+            kind: row.kind,
+            count: row.count,
+            hidden: preferences
+                .iter()
+                .find(|preference| preference.id == row.id)
+                .map(|preference| preference.hidden)
+                .unwrap_or_else(|| hidden_by_default(row)),
+        })
+        .collect::<Vec<_>>();
+    rows.retain(|row| {
+        !settings
+            .iter()
+            .any(|option| option.id == row.id && option.hidden)
+    });
+    (rows, settings)
+}
+
+/// Orders shelves by the account's saved preference.
+///
+/// Shelves the account never sorted keep the default order and land at the end, so a genre that
+/// arrives with a later scan is added without disturbing a hand-made arrangement.
+fn sort_categories(rows: &mut [CategoryRow], preferences: &[CategoryPreference]) {
+    let rank = |row: &CategoryRow| {
+        preferences
+            .iter()
+            .position(|preference| preference.id == row.id)
+    };
+    rows.sort_by(|left, right| match (rank(left), rank(right)) {
+        (Some(left_rank), Some(right_rank)) => left_rank.cmp(&right_rank),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => default_rank(left).cmp(&default_rank(right)),
+    });
+}
+
+/// Default shelf ranking: the account's own shelves first, then science fiction, then collections,
+/// then the movie shelves by size. Series close the run just above the repair queue, which stays
+/// last so the home screen ends with what still needs work.
+fn default_rank(row: &CategoryRow) -> (u8, i64, String) {
+    let tier = match (row.kind, row.id.as_str()) {
+        (CategoryKind::Custom, _) => 0,
+        (_, "ciencia-ficcion") => 1,
+        (CategoryKind::Sagas, _) => 2,
+        (CategoryKind::Movies, _) => 3,
+        (_, ALL_SERIES_ID) => 5,
+        (CategoryKind::Series, _) => 4,
+        (CategoryKind::Uncategorized, _) => 6,
+    };
+    (tier, -(row.count as i64), row.label.to_lowercase())
+}
+
 fn row_to_summary(row: &Row<'_>) -> rusqlite::Result<MediaSummary> {
     let kind: String = row.get(1)?;
     let position: i64 = row.get(8)?;
     let duration: i64 = row.get(9)?;
+    let overview: Option<String> = row.get(7)?;
+    let stored_genres: Vec<String> =
+        serde_json::from_str(&row.get::<_, String>(25)?).unwrap_or_default();
+    let categories = canonical_genres(&stored_genres);
+    let incomplete = categories.is_empty()
+        || overview.as_deref().map(str::trim).unwrap_or_default().is_empty();
+    let categories = shelve(categories, incomplete);
     Ok(MediaSummary {
         id: row.get(0)?,
         kind: if kind == "episode" {
@@ -2126,7 +2648,7 @@ fn row_to_summary(row: &Row<'_>) -> rusqlite::Result<MediaSummary> {
         series_title: row.get(4)?,
         season_number: row.get(5)?,
         episode_number: row.get(6)?,
-        overview: row.get(7)?,
+        overview,
         progress_percent: if duration > 0 {
             (position as f64 / duration as f64 * 100.0).clamp(0.0, 100.0)
         } else {
@@ -2149,6 +2671,11 @@ fn row_to_summary(row: &Row<'_>) -> rusqlite::Result<MediaSummary> {
             audio_codec: row.get(23)?,
             hdr_type: row.get(24)?,
         },
+        categories,
+        incomplete,
+        saga_id: row.get(26)?,
+        saga_title: row.get(27)?,
+        saga_position: row.get(28)?,
     })
 }
 
@@ -3124,6 +3651,8 @@ mod tests {
             source_language: "es-AR".into(),
             poster_url: Some("https://image.tmdb.org/daybreakers.jpg".into()),
             backdrop_url: None,
+            collection_id: None,
+            collection_name: None,
         };
 
         db.apply_imported_metadata(
@@ -3395,5 +3924,516 @@ mod tests {
         assert_eq!(item.series_title, None);
         assert_eq!(item.season_number, None);
         assert_eq!(item.episode_number, None);
+    }
+
+    /// Registers one movie and gives it the requested sheet.
+    fn shelved_movie(
+        db: &Database,
+        root: &str,
+        scan: &str,
+        file: &str,
+        genres: &[&str],
+        overview: Option<&str>,
+    ) -> String {
+        let item = db
+            .upsert_file(root, scan, &discovered_file(file, file))
+            .unwrap();
+        db.update_media_metadata(
+            &item.media_id,
+            &MediaMetadataUpdate {
+                title: file.rsplit('\\').next().unwrap_or(file).to_owned(),
+                year: Some(2001),
+                overview: overview.map(str::to_owned),
+                genres: genres.iter().map(|genre| (*genre).to_owned()).collect(),
+                cast: vec![],
+                poster_path: None,
+                backdrop_path: None,
+            },
+        )
+        .unwrap();
+        item.media_id
+    }
+
+    #[test]
+    fn every_movie_reaches_a_shelf() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        let complete = shelved_movie(
+            &db,
+            &root,
+            "scan-1",
+            r"D:\media\Alien.mkv",
+            &["Terror"],
+            Some("Una sinopsis."),
+        );
+        let without_overview =
+            shelved_movie(&db, &root, "scan-1", r"D:\media\Robocop.mkv", &["Acción"], None);
+        let without_anything =
+            shelved_movie(&db, &root, "scan-1", r"D:\media\Rareza.mkv", &[], None);
+        db.finish_scan(&root, "scan-1", "completed", 3, 3, 0, 0)
+            .unwrap();
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        let home = db.home(Some(&account.id)).unwrap();
+
+        for movie in &home.movies {
+            assert!(
+                !movie.categories.is_empty(),
+                "{} quedó fuera de toda categoría",
+                movie.title
+            );
+            assert!(
+                home.categories.iter().any(|row| {
+                    row.items.iter().any(|item| item.id == movie.id)
+                        || row.sagas.iter().any(|saga| {
+                            saga.items.iter().any(|item| item.id == movie.id)
+                        })
+                }),
+                "{} no aparece en ninguna fila",
+                movie.title
+            );
+        }
+
+        let uncategorized = home
+            .categories
+            .iter()
+            .find(|row| row.id == UNCATEGORIZED_ID)
+            .expect("falta la fila Sin categoría");
+        assert!(
+            uncategorized
+                .items
+                .iter()
+                .any(|item| item.id == without_anything)
+        );
+        assert!(
+            uncategorized
+                .items
+                .iter()
+                .any(|item| item.id == without_overview),
+            "una ficha sin sinopsis debe entrar en la cola de arreglo"
+        );
+        assert!(
+            home.categories
+                .iter()
+                .find(|row| row.id == "accion")
+                .is_some_and(|row| row.items.iter().any(|item| item.id == without_overview)),
+            "una ficha sin sinopsis conserva su género"
+        );
+        assert!(
+            !uncategorized.items.iter().any(|item| item.id == complete),
+            "una ficha completa no debe caer en Sin categoría"
+        );
+    }
+
+    #[test]
+    fn series_close_the_run_just_above_the_repair_queue() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        shelved_movie(
+            &db,
+            &root,
+            "scan-1",
+            r"D:\media\Alien.mkv",
+            &["Terror"],
+            Some("Sinopsis."),
+        );
+        shelved_movie(&db, &root, "scan-1", r"D:\media\Perdida.mkv", &[], None);
+        let episode = shelved_movie(
+            &db,
+            &root,
+            "scan-1",
+            r"D:\media\Chucky.mkv",
+            &["Terror"],
+            Some("Sinopsis."),
+        );
+        db.resolve_identification(
+            &episode,
+            &ClassificationUpdate {
+                kind: MediaKind::Episode,
+                title: "Piloto".into(),
+                series_title: Some("Chucky".into()),
+                season_number: Some(1),
+                episode_number: Some(1),
+            },
+        )
+        .unwrap();
+        db.finish_scan(&root, "scan-1", "completed", 3, 3, 0, 0)
+            .unwrap();
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        let ids = db
+            .home(Some(&account.id))
+            .unwrap()
+            .categories
+            .iter()
+            .map(|row| row.id.clone())
+            .collect::<Vec<_>>();
+
+        let series = ids.iter().position(|id| id == ALL_SERIES_ID);
+        let pending = ids.iter().position(|id| id == UNCATEGORIZED_ID);
+        assert_eq!(series.map(|index| index + 1), pending);
+        assert_eq!(pending, Some(ids.len() - 1));
+        assert!(
+            ids.iter()
+                .position(|id| id == "terror")
+                .is_some_and(|movies| Some(movies) < series),
+            "los géneros de películas van antes que la fila Series"
+        );
+    }
+
+    #[test]
+    fn default_order_opens_with_science_fiction_and_closes_with_the_repair_queue() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        for index in 0..3 {
+            shelved_movie(
+                &db,
+                &root,
+                "scan-1",
+                &format!(r"D:\media\Terror{index}.mkv"),
+                &["Terror"],
+                Some("Sinopsis."),
+            );
+        }
+        shelved_movie(
+            &db,
+            &root,
+            "scan-1",
+            r"D:\media\Matrix.mkv",
+            &["Ciencia ficción"],
+            Some("Sinopsis."),
+        );
+        shelved_movie(&db, &root, "scan-1", r"D:\media\Perdida.mkv", &[], None);
+        db.finish_scan(&root, "scan-1", "completed", 5, 5, 0, 0)
+            .unwrap();
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        let home = db.home(Some(&account.id)).unwrap();
+
+        assert_eq!(home.categories.first().map(|row| row.id.as_str()), Some("ciencia-ficcion"));
+        assert_eq!(
+            home.categories.last().map(|row| row.id.as_str()),
+            Some(UNCATEGORIZED_ID)
+        );
+    }
+
+    #[test]
+    fn saved_order_wins_and_later_genres_land_at_the_end() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        shelved_movie(
+            &db,
+            &root,
+            "scan-1",
+            r"D:\media\Matrix.mkv",
+            &["Ciencia ficción"],
+            Some("Sinopsis."),
+        );
+        shelved_movie(
+            &db,
+            &root,
+            "scan-1",
+            r"D:\media\Alien.mkv",
+            &["Terror"],
+            Some("Sinopsis."),
+        );
+        shelved_movie(
+            &db,
+            &root,
+            "scan-1",
+            r"D:\media\Amelie.mkv",
+            &["Comedia"],
+            Some("Sinopsis."),
+        );
+        db.finish_scan(&root, "scan-1", "completed", 3, 3, 0, 0)
+            .unwrap();
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        db.set_category_preferences(
+            Some(&account.id),
+            &[
+                CategoryPreference {
+                    id: "terror".into(),
+                    hidden: false,
+                },
+                CategoryPreference {
+                    id: "ciencia-ficcion".into(),
+                    hidden: true,
+                },
+            ],
+        )
+        .unwrap();
+        let home = db.home(Some(&account.id)).unwrap();
+
+        assert_eq!(home.categories.first().map(|row| row.id.as_str()), Some("terror"));
+        assert!(
+            !home
+                .categories
+                .iter()
+                .any(|row| row.id == "ciencia-ficcion"),
+            "una categoría apagada no se dibuja"
+        );
+        assert!(
+            home.category_settings
+                .iter()
+                .any(|option| option.id == "ciencia-ficcion" && option.hidden),
+            "una categoría apagada sigue listada en Configuración"
+        );
+        let comedy = home
+            .categories
+            .iter()
+            .position(|row| row.id == "comedia")
+            .expect("falta la comedia");
+        assert_eq!(
+            comedy,
+            home.categories.len() - 1,
+            "un género que la cuenta nunca ordenó se agrega al final"
+        );
+    }
+
+    #[test]
+    fn series_are_shelved_apart_from_movies() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        shelved_movie(
+            &db,
+            &root,
+            "scan-1",
+            r"D:\media\Alien.mkv",
+            &["Terror"],
+            Some("Sinopsis."),
+        );
+        let episode = shelved_movie(
+            &db,
+            &root,
+            "scan-1",
+            r"D:\media\Chucky.mkv",
+            &["Terror"],
+            Some("Sinopsis."),
+        );
+        db.resolve_identification(
+            &episode,
+            &ClassificationUpdate {
+                kind: MediaKind::Episode,
+                title: "Piloto".into(),
+                series_title: Some("Chucky".into()),
+                season_number: Some(1),
+                episode_number: Some(1),
+            },
+        )
+        .unwrap();
+        db.finish_scan(&root, "scan-1", "completed", 2, 2, 0, 0)
+            .unwrap();
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        let home = db.home(Some(&account.id)).unwrap();
+
+        let movies = home
+            .categories
+            .iter()
+            .find(|row| row.id == "terror")
+            .expect("falta la fila de películas de terror");
+        assert_eq!(movies.count, 1);
+        let shows = home
+            .category_settings
+            .iter()
+            .find(|option| option.id == "series-terror")
+            .expect("falta la fila de series de terror");
+        assert_eq!(shows.label, "Series de terror");
+        assert_eq!(shows.count, 1);
+        assert!(
+            shows.hidden,
+            "arranca apagada porque la fila Series ya junta todas"
+        );
+    }
+
+    #[test]
+    fn every_series_ships_on_one_shelf_while_the_genre_shelves_start_off() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        let episode = shelved_movie(
+            &db,
+            &root,
+            "scan-1",
+            r"D:\media\Chucky.mkv",
+            &["Terror"],
+            Some("Sinopsis."),
+        );
+        db.resolve_identification(
+            &episode,
+            &ClassificationUpdate {
+                kind: MediaKind::Episode,
+                title: "Piloto".into(),
+                series_title: Some("Chucky".into()),
+                season_number: Some(1),
+                episode_number: Some(1),
+            },
+        )
+        .unwrap();
+        db.finish_scan(&root, "scan-1", "completed", 1, 1, 0, 0)
+            .unwrap();
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        let home = db.home(Some(&account.id)).unwrap();
+
+        let all = home
+            .categories
+            .iter()
+            .find(|row| row.id == ALL_SERIES_ID)
+            .expect("falta la fila Series");
+        assert_eq!(all.series.len(), 1);
+        assert!(
+            !home.categories.iter().any(|row| row.id == "series-terror"),
+            "las filas por género de series arrancan apagadas"
+        );
+        assert!(
+            home.category_settings
+                .iter()
+                .any(|option| option.id == "series-terror" && option.hidden),
+            "siguen listadas en Configuración para poder encenderlas"
+        );
+    }
+
+    #[test]
+    fn custom_shelves_hold_what_the_account_assigns() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        let movie = shelved_movie(
+            &db,
+            &root,
+            "scan-1",
+            r"D:\media\Alien.mkv",
+            &["Terror"],
+            Some("Sinopsis."),
+        );
+        db.finish_scan(&root, "scan-1", "completed", 1, 1, 0, 0)
+            .unwrap();
+        let account = db.create_account("Jael", "abcd1").unwrap();
+
+        let id = db
+            .create_custom_category(Some(&account.id), "Para ver con Rox")
+            .unwrap();
+        assert!(
+            db.create_custom_category(Some(&account.id), "para ver con rox")
+                .is_err(),
+            "no se permiten dos categorías con el mismo nombre"
+        );
+        db.set_custom_category_member(Some(&account.id), &id, Some(&movie), None, true)
+            .unwrap();
+        let home = db.home(Some(&account.id)).unwrap();
+        let shelf = home
+            .categories
+            .iter()
+            .find(|row| row.id == id)
+            .expect("falta la categoría propia");
+        assert_eq!(shelf.label, "Para ver con Rox");
+        assert_eq!(shelf.count, 1);
+        assert_eq!(shelf.items[0].id, movie);
+        assert!(
+            home.categories.iter().any(|row| row.id == "terror"),
+            "asignarla a mano no la saca de su género"
+        );
+
+        db.set_custom_category_member(Some(&account.id), &id, Some(&movie), None, false)
+            .unwrap();
+        assert_eq!(
+            db.home(Some(&account.id))
+                .unwrap()
+                .categories
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| row.count),
+            Some(0)
+        );
+
+        db.delete_custom_category(Some(&account.id), &id).unwrap();
+        assert!(
+            !db.home(Some(&account.id))
+                .unwrap()
+                .categories
+                .iter()
+                .any(|row| row.id == id)
+        );
+        assert!(
+            db.catalog(Some(&account.id), &CatalogQuery::default())
+                .unwrap()
+                .iter()
+                .any(|item| item.id == movie),
+            "borrar la categoría no toca las películas"
+        );
+    }
+
+    #[test]
+    fn category_style_defaults_to_gold_and_rejects_unknown_looks() {
+        let db = Database::open(":memory:").unwrap();
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        assert_eq!(db.category_style(Some(&account.id)).unwrap(), "gold");
+
+        db.set_category_style(Some(&account.id), "dark").unwrap();
+        assert_eq!(db.category_style(Some(&account.id)).unwrap(), "dark");
+        assert!(db.set_category_style(Some(&account.id), "neon").is_err());
+        assert_eq!(
+            db.category_style(Some(&account.id)).unwrap(),
+            "dark",
+            "un estilo inválido no puede pisar el elegido"
+        );
+
+        let other = db.create_account("Rox", "abcd2").unwrap();
+        assert_eq!(
+            db.category_style(Some(&other.id)).unwrap(),
+            "gold",
+            "cada cuenta elige su propio estilo"
+        );
+    }
+
+    #[test]
+    fn imported_collections_build_a_saga() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        for (index, file) in [r"D:\media\Alien.mkv", r"D:\media\Aliens.mkv"]
+            .into_iter()
+            .enumerate()
+        {
+            let item = db
+                .upsert_file(&root, "scan-1", &discovered_file(file, file))
+                .unwrap();
+            db.apply_imported_metadata(
+                &item.media_id,
+                &ImportedMediaMetadata {
+                    provider: "tmdb".into(),
+                    title: format!("Alien {}", index + 1),
+                    year: Some(1979 + index as i32),
+                    overview: Some("Sinopsis.".into()),
+                    genres: vec!["Terror".into()],
+                    cast: vec![],
+                    source_url: "https://www.themoviedb.org/movie/348".into(),
+                    source_language: "es-AR".into(),
+                    poster_url: None,
+                    backdrop_url: None,
+                    collection_id: Some("tmdb:8091".into()),
+                    collection_name: Some("Colección Alien".into()),
+                },
+                None,
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        }
+        db.finish_scan(&root, "scan-1", "completed", 2, 2, 0, 0)
+            .unwrap();
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        let home = db.home(Some(&account.id)).unwrap();
+
+        let sagas = home
+            .categories
+            .iter()
+            .find(|row| row.id == SAGAS_ID)
+            .expect("falta la fila de sagas");
+        assert_eq!(sagas.sagas.len(), 1);
+        assert_eq!(sagas.sagas[0].title, "Colección Alien");
+        assert_eq!(sagas.sagas[0].items.len(), 2);
     }
 }

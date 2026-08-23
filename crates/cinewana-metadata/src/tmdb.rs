@@ -243,6 +243,14 @@ impl TmdbMetadataClient {
             source_language: PRIMARY_LANGUAGE.to_owned(),
             poster_url: image_url("w500", primary.poster_path.as_deref()),
             backdrop_url: image_url("w1280", primary.backdrop_path.as_deref()),
+            collection_id: primary
+                .belongs_to_collection
+                .as_ref()
+                .map(|collection| format!("tmdb:{}", collection.id)),
+            collection_name: primary
+                .belongs_to_collection
+                .as_ref()
+                .and_then(|collection| non_empty(collection.name.clone())),
         })
     }
 
@@ -295,6 +303,8 @@ impl TmdbMetadataClient {
             source_language: PRIMARY_LANGUAGE.to_owned(),
             poster_url: image_url("w500", series.poster_path.as_deref()),
             backdrop_url: image_url("w1280", backdrop_path.as_deref()),
+            collection_id: None,
+            collection_name: None,
         })
     }
 
@@ -655,6 +665,7 @@ struct MediaDetails {
     backdrop_path: Option<String>,
     credits: Option<TmdbCredits>,
     aggregate_credits: Option<TmdbCredits>,
+    belongs_to_collection: Option<TmdbCollection>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -669,6 +680,13 @@ struct EpisodeDetails {
 #[derive(Debug, Deserialize)]
 struct TmdbGenre {
     name: String,
+}
+
+/// The saga a movie belongs to, as declared by TMDB on the movie endpoint.
+#[derive(Debug, Clone, Deserialize)]
+struct TmdbCollection {
+    id: i64,
+    name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
