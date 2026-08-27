@@ -135,6 +135,8 @@
 
 ## In progress: local remote control PWA
 
+- Prepared version 0.3.12 as the signed updater release for a Continuar viendo shelf that finally works: every unfinished title is listed instead of the first twenty, the shelf is ordered by what was watched most recently instead of by library date, and a small trash control on each poster removes a title from the shelf without losing its resume point
+- `MediaSummary` now carries `last_watched_at`. The value was always stored but never reached the screen, so the shelf had nothing to sort by and a title watched minutes ago could fall outside it
 - Prepared version 0.3.11 as the signed updater release for the `peliculas nuevas` tray: startup stops scanning the finished library, new movies are processed once and moved into place, unchanged titles are left alone, the TMDB re-query loop is closed, browsing no longer waits behind the scan, and a background pass every five days still reports what it found
 - Added a release-build guard that blocks Windows installers without a configured TMDB credential, forces Cargo to rebuild when that credential changes, and documented the 0.3.10 installer incident and recovery checklist
 - Prepared version 0.3.10 as the signed updater release for full-screen title sheets, cast and director photos, complete metadata rescanning, portable person artwork, draggable-shelf preferences, and a fixed mobile remote-control layout

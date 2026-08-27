@@ -1218,12 +1218,16 @@ impl Database {
             .filter(|m| m.kind == MediaKind::Movie)
             .cloned()
             .collect();
-        let continue_watching = all
+        /* Sin tope a propósito: si empezaste cien películas, las cien tienen que estar. Tener que
+           ir a buscarlas a mano por la biblioteca es exactamente lo que esta fila evita. Y van
+           ordenadas por lo último que miraste, no por cuándo entraron a la biblioteca: con el
+           orden viejo una película recién vista podía quedar fuera de la fila. */
+        let mut continue_watching: Vec<_> = all
             .iter()
             .filter(|m| m.progress_percent > 0.0 && !m.completed)
-            .take(20)
             .cloned()
             .collect();
+        continue_watching.sort_by(|a, b| b.last_watched_at.cmp(&a.last_watched_at));
         let favorites = all
             .iter()
             .filter(|m| m.favorite)
@@ -1804,6 +1808,22 @@ impl Database {
         Ok(())
     }
 
+    /// Marca o desmarca un título como terminado, conservando el punto donde quedó.
+    ///
+    /// Es el tacho de basura de «Continuar viendo»: la película que llegó a los créditos y quedó
+    /// colgada ahí tapando a las que sí se van a retomar. No borra nada — el minuto donde quedó se
+    /// conserva, así que se puede seguir viendo desde ahí, y desmarcarla la devuelve a la fila.
+    pub fn set_watched(&self, account_id: &str, media_id: &str, watched: bool) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.connection.lock().execute(
+            "INSERT INTO account_watch_progress(account_id,media_item_id,position_ms,duration_ms,completed,last_watched_at)
+             VALUES(?1,?2,0,0,?3,?4)
+             ON CONFLICT(account_id,media_item_id) DO UPDATE SET completed=excluded.completed",
+            params![account_id, media_id, watched as i64, now],
+        )?;
+        Ok(())
+    }
+
     pub fn media_path(&self, media_id: &str) -> Result<Option<String>> {
         self.connection
             .lock()
@@ -2138,7 +2158,7 @@ SELECT m.id,m.kind,m.title,m.year,m.series_title,m.season_number,m.episode_numbe
        COALESCE(p.position_ms,0),COALESCE(p.duration_ms,COALESCE(m.runtime_ms,f.duration_ms,0)),COALESCE(p.completed,0),
        COALESCE(u.favorite,0),COALESCE(u.in_watchlist,0),f.offline,m.created_at,m.poster_cache_key,m.backdrop_cache_key,m.preview_cache_key,
        COALESCE(m.runtime_ms,f.duration_ms),f.width,f.height,f.container,f.video_codec,f.audio_codec,f.hdr_type,
-       m.genres_json,m.saga_id,m.saga_title,m.saga_position
+       m.genres_json,m.saga_id,m.saga_title,m.saga_position,p.last_watched_at
 FROM media_items m JOIN media_files f ON f.media_item_id=m.id
 JOIN library_roots r ON r.id=f.library_root_id
 LEFT JOIN account_watch_progress p ON p.media_item_id=m.id AND p.account_id=?1
@@ -2151,7 +2171,7 @@ SELECT m.id,m.kind,m.title,m.year,m.series_title,m.season_number,m.episode_numbe
        COALESCE(p.position_ms,0),COALESCE(p.duration_ms,COALESCE(m.runtime_ms,f.duration_ms,0)),COALESCE(p.completed,0),
        COALESCE(u.favorite,0),COALESCE(u.in_watchlist,0),f.offline,m.created_at,m.poster_cache_key,m.backdrop_cache_key,m.preview_cache_key,
        COALESCE(m.runtime_ms,f.duration_ms),f.width,f.height,f.container,f.video_codec,f.audio_codec,f.hdr_type,
-       m.genres_json,m.saga_id,m.saga_title,m.saga_position
+       m.genres_json,m.saga_id,m.saga_title,m.saga_position,p.last_watched_at
 FROM media_items m JOIN media_files f ON f.media_item_id=m.id
 JOIN library_roots r ON r.id=f.library_root_id
 LEFT JOIN account_watch_progress p ON p.media_item_id=m.id AND p.account_id=?1
@@ -2856,6 +2876,7 @@ fn row_to_summary(row: &Row<'_>) -> rusqlite::Result<MediaSummary> {
         saga_id: row.get(26)?,
         saga_title: row.get(27)?,
         saga_position: row.get(28)?,
+        last_watched_at: row.get(29)?,
     })
 }
 
@@ -3272,6 +3293,84 @@ mod tests {
             technical: MediaTechnical::default(),
             external_subtitles: vec![],
         }
+    }
+
+    /// «Continuar viendo» tiene que traer todo lo empezado, no una tanda.
+    ///
+    /// Antes cortaba en veinte y elegía esos veinte por fecha de alta en la biblioteca, así que una
+    /// película recién vista podía no aparecer y había que ir a buscarla a mano.
+    #[test]
+    fn continue_watching_keeps_every_unfinished_title() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        let mut ids = Vec::new();
+        for index in 0..25 {
+            let path = format!(r"D:\media\PELICULAS\Pelicula {index:02}\Pelicula {index:02}.mkv");
+            let file = discovered_file(&path, &format!("huella-{index}"));
+            ids.push(db.upsert_file(&root, "scan-1", &file).unwrap().media_id);
+        }
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        for id in &ids {
+            db.save_progress(&account.id, id, 600_000, 6_000_000).unwrap();
+        }
+
+        let home = db.home(Some(&account.id)).unwrap();
+        assert_eq!(
+            home.continue_watching.len(),
+            25,
+            "empezaste veinticinco, tienen que estar las veinticinco"
+        );
+    }
+
+    /// El tacho de «Continuar viendo» saca el título sin perder dónde quedó.
+    #[test]
+    fn dismissing_a_title_removes_it_but_keeps_the_resume_point() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        let quedan = db
+            .upsert_file(
+                &root,
+                "scan-1",
+                &discovered_file(r"D:\media\PELICULAS\Alfa\Alfa.mkv", "alfa"),
+            )
+            .unwrap()
+            .media_id;
+        let fuera = db
+            .upsert_file(
+                &root,
+                "scan-1",
+                &discovered_file(r"D:\media\PELICULAS\Beta\Beta.mkv", "beta"),
+            )
+            .unwrap()
+            .media_id;
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        db.save_progress(&account.id, &quedan, 600_000, 6_000_000)
+            .unwrap();
+        db.save_progress(&account.id, &fuera, 900_000, 6_000_000)
+            .unwrap();
+        assert_eq!(db.home(Some(&account.id)).unwrap().continue_watching.len(), 2);
+
+        db.set_watched(&account.id, &fuera, true).unwrap();
+
+        let home = db.home(Some(&account.id)).unwrap();
+        let quedaron: Vec<_> = home.continue_watching.iter().map(|m| &m.id).collect();
+        assert_eq!(quedaron, vec![&quedan], "la quitada no puede seguir ahí");
+
+        let detail = db.media_detail(Some(&account.id), &fuera).unwrap().unwrap();
+        assert_eq!(
+            detail.summary.progress_percent > 0.0,
+            true,
+            "quitarla de la fila no puede borrar el minuto donde quedó"
+        );
+
+        db.set_watched(&account.id, &fuera, false).unwrap();
+        assert_eq!(
+            db.home(Some(&account.id)).unwrap().continue_watching.len(),
+            2,
+            "desmarcarla la tiene que devolver a la fila"
+        );
     }
 
     #[test]

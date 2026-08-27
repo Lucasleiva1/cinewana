@@ -432,7 +432,7 @@ dependencies = [
 
 [[package]]
 name = "cine-wana-desktop"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "anyhow",
  "axum",
@@ -460,7 +460,7 @@ dependencies = [
 
 [[package]]
 name = "cinewana-core"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "chrono",
  "regex",
@@ -470,7 +470,7 @@ dependencies = [
 
 [[package]]
 name = "cinewana-database"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "anyhow",
  "chrono",
@@ -484,7 +484,7 @@ dependencies = [
 
 [[package]]
 name = "cinewana-metadata"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "anyhow",
  "chrono",
@@ -498,7 +498,7 @@ dependencies = [
 
 [[package]]
 name = "cinewana-player"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "anyhow",
  "cinewana-core",
@@ -509,7 +509,7 @@ dependencies = [
 
 [[package]]
 name = "cinewana-scanner"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "anyhow",
  "blake3",

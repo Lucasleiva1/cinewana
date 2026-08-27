@@ -78,6 +78,13 @@ pub struct MediaSummary {
     pub completed: bool,
     pub offline: bool,
     pub added_at: String,
+    /// Cuándo se vio por última vez.
+    ///
+    /// Es lo que ordena «Continuar viendo». El dato siempre estuvo guardado, pero no llegaba hasta
+    /// acá, así que la fila terminaba ordenada por fecha de alta en la biblioteca —que no tiene
+    /// nada que ver con lo último que miraste— y la película recién vista podía no aparecer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_watched_at: Option<String>,
     pub artwork_url: Option<String>,
     pub backdrop_url: Option<String>,
     pub preview_url: Option<String>,

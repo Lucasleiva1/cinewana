@@ -446,6 +446,21 @@ fn set_media_flag(
         .map_err(error_string)
 }
 
+/// Saca un título de «Continuar viendo» sin perder el minuto donde quedó.
+#[tauri::command]
+fn set_media_watched(
+    media_id: String,
+    watched: bool,
+    state: State<'_, AppServices>,
+) -> Result<HomeDto, String> {
+    let account_id = state.db.require_active_account_id().map_err(error_string)?;
+    state
+        .db
+        .set_watched(&account_id, &media_id, watched)
+        .map_err(error_string)?;
+    state.db.home(Some(&account_id)).map_err(error_string)
+}
+
 #[tauri::command]
 fn save_progress(
     media_id: String,
@@ -1577,6 +1592,7 @@ pub fn run() {
             apply_metadata_candidate,
             metadata_poster_options,
             set_media_flag,
+            set_media_watched,
             save_progress,
             scan_status,
             start_scan,

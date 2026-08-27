@@ -13,7 +13,7 @@ export interface ImageAnalysisProgress {
 export interface MediaSummary {
   id: string; kind: MediaKind; title: string; year?: number; seriesTitle?: string; seasonNumber?: number; episodeNumber?: number;
   overview?:string;
-  progressPercent: number; favorite: boolean; inWatchlist: boolean; completed: boolean; offline: boolean; addedAt: string;
+  progressPercent: number; favorite: boolean; inWatchlist: boolean; completed: boolean; offline: boolean; addedAt: string; lastWatchedAt?: string;
   artworkUrl?: string; backdropUrl?: string; previewUrl?: string; technical: MediaTechnical;
   categories: string[]; incomplete: boolean; sagaId?: string; sagaTitle?: string; sagaPosition?: number;
 }
