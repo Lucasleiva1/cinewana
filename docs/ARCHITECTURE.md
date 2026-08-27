@@ -1,6 +1,6 @@
 # Architecture
 
-The React presentation layer uses typed Tauri IPC. Rust owns domain models and application services. Portable `.cinewana` packages beside the media are the durable catalog source, while SQLite is the fast local index and per-account state store. Original media files remain read-only; Rust may only write inside its own `.cinewana` directories. Scanner and metadata work run away from the UI thread and publish progress events.
+The React presentation layer uses typed Tauri IPC. Rust owns domain models and application services. Portable `.cinewana` packages beside the media are the durable catalog source, while SQLite is the fast local index and per-account state store. Original media files are never rewritten, transcoded, or deleted, and Rust may only write inside its own `.cinewana` directories — with one deliberate exception, the `peliculas nuevas` tray, whose contents are moved once into the movies folder and never touched again. Scanner and metadata work run away from the UI thread and publish progress events.
 
 `LibraryService` coordinates the database and catalog. `ScannerService` discovers and reconciles files. `MetadataService` resolves local/TMDB/generated data. `PlayerService` wraps libmpv. `ProgressService`, `SettingsService`, and `ImageProfileService` persist user state. `FutureNetworkService` is an unimplemented boundary reserved for a later local server.
 

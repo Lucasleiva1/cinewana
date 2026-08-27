@@ -51,14 +51,16 @@ Then create the upload-ready assets:
 .\scripts\create-updater-release-assets.ps1 -Version 0.1.3 -Notes "Notas de la version"
 ```
 
+The upload-ready files are preserved in `artifacts\releases\v<version>`, outside Cargo's disposable `target` directory.
+
 Create or update the GitHub Release:
 
 ```powershell
 gh release create app-v0.1.3 `
   -R Lucasleiva1/cinewana `
-  target\release\bundle\release-assets-0.1.3\CINE.WANA_0.1.3_x64-setup.exe `
-  target\release\bundle\release-assets-0.1.3\CINE.WANA_0.1.3_x64-setup.exe.sig `
-  target\release\bundle\release-assets-0.1.3\latest.json `
+  artifacts\releases\v0.1.3\CINE.WANA_0.1.3_x64-setup.exe `
+  artifacts\releases\v0.1.3\CINE.WANA_0.1.3_x64-setup.exe.sig `
+  artifacts\releases\v0.1.3\latest.json `
   --title "CINE WANA v0.1.3" `
   --notes "Notas de la version" `
   --latest

@@ -114,6 +114,17 @@
 - Configuración can refresh every sheet in one pass, with visible progress and a cancel, so titles imported before a feature existed catch up
 - Movie title sheets once again occupy the complete CINE WANA window, keep their close control fixed, hide native Windows scrollbars, and open cast photos in a centered, keyboard-dismissable viewer whose close control sits directly on the photo
 
+## Opening the application no longer costs a library scan
+
+- A `peliculas nuevas` tray sits beside the finished `PELICULAS` and `SERIES` folders. Startup looks only at that tray, so an ordinary launch with nothing new touches neither the disk nor the database
+- Each movie left in the tray is moved once into the movies folder and then processed there: technical data, generated artwork, TMDB sheet, cast, and portable `.cinewana` package. A title that cannot be identified is moved anyway and surfaces through the existing identification-review flow, so the tray always ends up empty
+- A loose video file gets its own folder to match the shape of the existing library, and its external subtitles travel with it. An existing title is never overwritten
+- Series stay manual on purpose: they are dropped straight into `SERIES` and picked up by the Reescanear button, which still rebuilds every sheet
+- The automatic pass no longer rewrites the identification, portable package, or metadata of files that did not change; only the manual rescan does
+- Titles TMDB has no cast for are no longer re-queried on every launch — the stored check date is now honoured for thirty days
+- The scan owns a second SQLite connection, so browsing the library stays responsive while a pass runs
+- A full pass still runs every five days to catch what was deleted or moved from the Explorer, in the background, and reports what it found when it finishes
+
 ## Pending after the functional media pass
 
 - File-system watcher/debounce and scan concurrency tuning
@@ -124,6 +135,8 @@
 
 ## In progress: local remote control PWA
 
+- Prepared version 0.3.11 as the signed updater release for the `peliculas nuevas` tray: startup stops scanning the finished library, new movies are processed once and moved into place, unchanged titles are left alone, the TMDB re-query loop is closed, browsing no longer waits behind the scan, and a background pass every five days still reports what it found
+- Added a release-build guard that blocks Windows installers without a configured TMDB credential, forces Cargo to rebuild when that credential changes, and documented the 0.3.10 installer incident and recovery checklist
 - Prepared version 0.3.10 as the signed updater release for full-screen title sheets, cast and director photos, complete metadata rescanning, portable person artwork, draggable-shelf preferences, and a fixed mobile remote-control layout
 - The mobile player keeps its progress, transport, volume, and quick-control geometry mounted from the first snapshot; connection updates only replace values, and next-content renders below the fixed volume area
 - The internal player now opens the same complete Settings view in a side panel matching the Image panel width, so playback can continue while remote control and other options are managed

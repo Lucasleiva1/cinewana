@@ -1,6 +1,7 @@
 node_modules/
 dist/
 target/
+artifacts/releases/
 .vite/
 .tools/
 .claude/skills/

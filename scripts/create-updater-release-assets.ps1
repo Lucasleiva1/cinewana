@@ -11,7 +11,7 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $nsisDir = Join-Path $repoRoot "target\release\bundle\nsis"
-$assetDir = Join-Path $repoRoot "target\release\bundle\release-assets-$Version"
+$assetDir = Join-Path $repoRoot "artifacts\releases\v$Version"
 
 $sourceExe = Get-ChildItem -LiteralPath $nsisDir -Filter "*$Version*_x64-setup.exe" |
   Select-Object -First 1

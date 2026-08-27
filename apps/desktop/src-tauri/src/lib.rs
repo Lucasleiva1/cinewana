@@ -1,3 +1,4 @@
+mod ingest;
 mod media_stream;
 pub mod portable_library;
 mod remote;
@@ -8,14 +9,14 @@ use cinewana_core::{
     MediaMetadataCandidate, MediaMetadataUpdate, MediaSummary, PlayerCommand, PlayerState,
     ScanProgress,
 };
-use cinewana_database::{Database, MetadataImportTarget};
+use cinewana_database::{Database, DiscoveredFile, MetadataImportTarget};
 use cinewana_metadata::{MetadataSearchOutcome, TmdbMetadataClient};
 use cinewana_player::PlayerService;
 use media_stream::MediaStreamService;
 use parking_lot::Mutex;
 use remote::{RemotePlayerSnapshot, RemoteService, RemoteStatusDto};
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::{
         Arc,
@@ -28,6 +29,13 @@ use uuid::Uuid;
 #[derive(Clone)]
 struct AppServices {
     db: Arc<Database>,
+    /// Conexión aparte, solo para el escaneo.
+    ///
+    /// La pantalla y el escaneo compartían un único canal hacia la base, y como el escaneo hace
+    /// miles de escrituras chiquitas, cada clic del usuario tenía que esperar su turno en esa fila.
+    /// Con SQLite en modo WAL las dos conexiones conviven, así que navegar la biblioteca ya no se
+    /// traba mientras el repaso corre por atrás.
+    scan_db: Arc<Database>,
     progress: Arc<Mutex<ScanProgress>>,
     running: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
@@ -924,15 +932,271 @@ fn write_identification_cache(services: &AppServices, media_id: &str) -> anyhow:
     Ok(())
 }
 
+/// Cada cuántos días toca el repaso completo que detecta lo borrado o movido desde el Explorador.
+const FULL_SCAN_EVERY_DAYS: i64 = 5;
+
+/// Termina de armar una película recién indexada: portada, ficha de TMDB y paquete portable.
+///
+/// Es el trabajo caro, y es justamente el que la bandeja permite hacer una sola vez por película en
+/// vez de repetirlo en cada arranque. Devuelve cuántos pasos fallaron.
+async fn finish_media(
+    app: &AppHandle,
+    services: &AppServices,
+    media_id: &str,
+    video: &Path,
+    file: &DiscoveredFile,
+) -> u64 {
+    let mut errors = 0u64;
+    if portable_library::restore_media(
+        &services.scan_db,
+        &services.cache_dir,
+        media_id,
+        video,
+        file.file_size,
+        Some(&file.fingerprint),
+    )
+    .is_err()
+    {
+        errors += 1;
+    }
+    if let Some(ffmpeg) = services.ffmpeg.as_deref() {
+        {
+            let mut progress = services.progress.lock();
+            progress.message = Some("Generando portada y vista previa…".into());
+            let _ = app.emit("scan-progress", progress.clone());
+        }
+        match cinewana_scanner::generate_artwork(
+            ffmpeg,
+            video,
+            &services.cache_dir,
+            &file.fingerprint,
+            file.technical.duration_ms,
+        )
+        .await
+        {
+            Ok((poster, backdrop, preview)) => {
+                if services
+                    .scan_db
+                    .set_artwork(
+                        media_id,
+                        &poster.to_string_lossy(),
+                        &backdrop.to_string_lossy(),
+                        &preview.to_string_lossy(),
+                    )
+                    .is_err()
+                {
+                    errors += 1;
+                }
+            }
+            Err(_) => errors += 1,
+        }
+    }
+    if services.metadata.configured()
+        && services
+            .scan_db
+            .should_auto_import_metadata(media_id)
+            .unwrap_or(false)
+        && let Ok(Some(target)) = services.scan_db.metadata_target(media_id)
+    {
+        {
+            let mut progress = services.progress.lock();
+            progress.message = Some(format!("Buscando portada oficial: {}", target.file_name));
+            let _ = app.emit("scan-progress", progress.clone());
+        }
+        let _ = import_metadata_for_target(services, &target).await;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    let _ = write_identification_cache(services, media_id);
+    errors
+}
+
+/// Procesa la bandeja «peliculas nuevas» de cada biblioteca y muda lo terminado a PELICULAS.
+///
+/// Es lo único que corre al abrir el programa. Con la bandeja vacía —el caso de todos los días— no
+/// se toca ni el disco ni la base y la ventana abre sin escanear nada.
+///
+/// Una película con problemas se muda igual y queda marcada adentro del programa para corregirla a
+/// mano. Dejarla en la bandeja la condenaría a reprocesarse en cada arranque.
+async fn run_ingest(app: &AppHandle, services: &AppServices) -> anyhow::Result<u64> {
+    let mut work = Vec::new();
+    for (root_id, root_path) in services.scan_db.enabled_roots_with_paths()? {
+        let root = PathBuf::from(&root_path);
+        if !root.is_dir() {
+            continue;
+        }
+        let Ok(tray) = ingest::ensure_tray(&root) else {
+            continue;
+        };
+        let pending = ingest::pending(&tray).unwrap_or_default();
+        if !pending.is_empty() {
+            work.push((root_id, root, pending));
+        }
+    }
+    if work.is_empty() {
+        return Ok(0);
+    }
+
+    let total: u64 = work.iter().map(|(_, _, pending)| pending.len() as u64).sum();
+    let job_id = Uuid::new_v4().to_string();
+    {
+        let mut progress = services.progress.lock();
+        *progress = ScanProgress {
+            job_id: Some(job_id),
+            running: true,
+            found: total,
+            message: Some(if total == 1 {
+                "Preparando 1 película nueva…".to_owned()
+            } else {
+                format!("Preparando {total} películas nuevas…")
+            }),
+            ..ScanProgress::default()
+        };
+        app.emit("scan-progress", progress.clone())?;
+    }
+
+    let mut done = 0u64;
+    let mut errors = 0u64;
+    for (root_id, root, pending) in work {
+        let library = ingest::library_dir(&root);
+        let scan_id = Uuid::new_v4().to_string();
+        services
+            .scan_db
+            .start_scan(&root_id, &scan_id, "peliculas-nuevas")?;
+        let mut processed = 0u64;
+        let mut root_errors = 0u64;
+        for movie in pending {
+            if services.cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            {
+                let mut progress = services.progress.lock();
+                progress.current_file = Some(movie.label.clone());
+                progress.processed = done;
+                progress.errors = errors;
+                progress.percent = (done as f64 / total as f64 * 100.0).min(100.0);
+                progress.message = Some(format!("Guardando {}", movie.label));
+                let _ = app.emit("scan-progress", progress.clone());
+            }
+            let moved = match ingest::move_into_library(&movie, &library) {
+                Ok(moved) => moved,
+                Err(error) => {
+                    /* Si la mudanza falla, la película se queda en la bandeja: queda a la vista y
+                       se reintenta sola en el próximo arranque. */
+                    eprintln!("no se pudo mudar {}: {error}", movie.label);
+                    errors += 1;
+                    root_errors += 1;
+                    done += 1;
+                    continue;
+                }
+            };
+            /* Ya está en la biblioteca: mostrar el nombre con el que quedó guardada, que puede no
+               ser el de la bandeja si había otra película con el mismo nombre. */
+            if let Some(name) = moved.destination.file_name().and_then(|name| name.to_str()) {
+                let mut progress = services.progress.lock();
+                progress.current_file = Some(name.to_owned());
+                let _ = app.emit("scan-progress", progress.clone());
+            }
+            for video in &moved.videos {
+                match cinewana_scanner::inspect(video, services.ffprobe.as_deref()).await {
+                    Ok(file) => match services.scan_db.upsert_file(&root_id, &scan_id, &file) {
+                        Ok(outcome) => {
+                            processed += 1;
+                            let failed =
+                                finish_media(app, services, &outcome.media_id, video, &file).await;
+                            errors += failed;
+                            root_errors += failed;
+                        }
+                        Err(_) => {
+                            errors += 1;
+                            root_errors += 1;
+                        }
+                    },
+                    Err(_) => {
+                        errors += 1;
+                        root_errors += 1;
+                    }
+                }
+            }
+            done += 1;
+        }
+        services
+            .scan_db
+            .finish_ingest(&root_id, &scan_id, processed, root_errors)?;
+    }
+
+    {
+        let mut progress = services.progress.lock();
+        progress.running = false;
+        progress.current_file = None;
+        progress.processed = done;
+        progress.errors = errors;
+        progress.percent = 100.0;
+        progress.message = Some(match (done, errors) {
+            (1, 0) => "Se agregó 1 película nueva".to_owned(),
+            (count, 0) => format!("Se agregaron {count} películas nuevas"),
+            (count, failed) => {
+                format!("Se agregaron {count} películas nuevas, {failed} para revisar")
+            }
+        });
+        app.emit("scan-progress", progress.clone())?;
+    }
+    app.emit("library-changed", ())?;
+    Ok(done)
+}
+
+/// El trabajo de arranque: la bandeja siempre, y el repaso completo solo cuando ya pasaron los días.
+fn spawn_startup_work(app: AppHandle, services: AppServices) {
+    if services
+        .running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    services.cancel.store(false, Ordering::SeqCst);
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = run_ingest(&app, &services).await {
+            eprintln!("bandeja de películas nuevas: {error}");
+        }
+        let due = match services.scan_db.last_full_scan_at() {
+            Ok(Some(last)) => {
+                chrono::Utc::now().signed_duration_since(last)
+                    >= chrono::Duration::days(FULL_SCAN_EVERY_DAYS)
+            }
+            /* Sin marca previa es la primera vez con esta versión: conviene un repaso para dejar la
+               base alineada con el disco antes de confiar solo en la bandeja. */
+            _ => true,
+        };
+        if due && !services.cancel.load(Ordering::SeqCst) {
+            if let Err(error) = run_scan(&app, &services, "repaso-periodico").await {
+                let mut progress = services.progress.lock();
+                progress.running = false;
+                progress.errors += 1;
+                progress.message = Some(format!("No se pudo completar el repaso: {error}"));
+                let _ = app.emit("scan-progress", progress.clone());
+            }
+        }
+        services.running.store(false, Ordering::SeqCst);
+    });
+}
+
 async fn run_scan(app: &AppHandle, services: &AppServices, reason: &str) -> anyhow::Result<()> {
-    let roots = services.db.enabled_roots_with_paths()?;
+    let roots = services.scan_db.enabled_roots_with_paths()?;
+    /* El botón de reescanear rehace todo a propósito: es la herramienta para forzar una corrección
+       cuando algo quedó mal. El repaso automático solo busca altas y bajas, así que no vuelve a
+       tocar las películas que ya están terminadas. */
+    let deep = reason == "manual";
     let job_id = Uuid::new_v4().to_string();
     {
         let mut p = services.progress.lock();
         *p = ScanProgress {
             job_id: Some(job_id.clone()),
             running: true,
-            message: Some("Buscando películas y series…".into()),
+            message: Some(if reason == "repaso-periodico" {
+                format!("Repaso de la biblioteca (cada {FULL_SCAN_EVERY_DAYS} días)…")
+            } else {
+                "Buscando películas y series…".to_owned()
+            }),
             ..ScanProgress::default()
         };
         app.emit("scan-progress", p.clone())?;
@@ -945,7 +1209,7 @@ async fn run_scan(app: &AppHandle, services: &AppServices, reason: &str) -> anyh
     for (root_index, (root_id, root_path)) in roots.into_iter().enumerate() {
         let root = PathBuf::from(&root_path);
         if !root.is_dir() {
-            services.db.set_root_status(&root_id, "disconnected")?;
+            services.scan_db.set_root_status(&root_id, "disconnected")?;
             continue;
         }
         let scan_id = if root_count == 1 {
@@ -953,7 +1217,7 @@ async fn run_scan(app: &AppHandle, services: &AppServices, reason: &str) -> anyh
         } else {
             Uuid::new_v4().to_string()
         };
-        services.db.start_scan(&root_id, &scan_id, reason)?;
+        services.scan_db.start_scan(&root_id, &scan_id, reason)?;
         let discover_root = root.clone();
         let files = tauri::async_runtime::spawn_blocking(move || {
             cinewana_scanner::discover(&discover_root, true)
@@ -995,33 +1259,40 @@ async fn run_scan(app: &AppHandle, services: &AppServices, reason: &str) -> anyh
             let path_text = path.to_string_lossy().into_owned();
             if let Ok(state) = cinewana_scanner::file_state(&path) {
                 let parsed = cinewana_core::parse_media_name(&path);
-                if let Some(outcome) = services.db.reconcile_unchanged_file(
+                if let Some(outcome) = services.scan_db.reconcile_unchanged_file(
                     &scan_id,
                     &path_text,
                     state.file_size,
                     state.modified_at,
                     &parsed,
+                    deep,
                 )? {
                     local_skipped += 1;
-                    if portable_library::restore_media(
-                        &services.db,
-                        &services.cache_dir,
-                        &outcome.media_id,
-                        &path,
-                        state.file_size,
-                        None,
-                    )
-                    .is_err()
-                    {
-                        local_errors += 1;
-                    }
-                    if services.metadata.configured()
-                        && services
-                            .db
-                            .should_auto_import_metadata(&outcome.media_id)
-                            .unwrap_or(false)
-                    {
-                        if let Ok(Some(target)) = services.db.metadata_target(&outcome.media_id) {
+                    /* Una película sin cambios ya tiene su ficha, su portada y su paquete portable
+                       hechos. Rehacerlos en cada arranque era el gasto que hacía sentir el escaneo
+                       como si empezara de cero. El botón de reescanear sí los rehace, para cuando
+                       hay que forzar una corrección a mano. */
+                    if deep {
+                        if portable_library::restore_media(
+                            &services.scan_db,
+                            &services.cache_dir,
+                            &outcome.media_id,
+                            &path,
+                            state.file_size,
+                            None,
+                        )
+                        .is_err()
+                        {
+                            local_errors += 1;
+                        }
+                        if services.metadata.configured()
+                            && services
+                                .scan_db
+                                .should_auto_import_metadata(&outcome.media_id)
+                                .unwrap_or(false)
+                            && let Ok(Some(target)) =
+                                services.scan_db.metadata_target(&outcome.media_id)
+                        {
                             {
                                 let mut p = services.progress.lock();
                                 p.message =
@@ -1031,84 +1302,21 @@ async fn run_scan(app: &AppHandle, services: &AppServices, reason: &str) -> anyh
                             let _ = import_metadata_for_target(services, &target).await;
                             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                         }
+                        let _ = write_identification_cache(services, &outcome.media_id);
                     }
-                    let _ = write_identification_cache(services, &outcome.media_id);
                     continue;
                 }
             }
             match cinewana_scanner::inspect(&path, services.ffprobe.as_deref()).await {
-                Ok(file) => match services.db.upsert_file(&root_id, &scan_id, &file) {
+                Ok(file) => match services.scan_db.upsert_file(&root_id, &scan_id, &file) {
                     Ok(outcome) => {
                         if outcome.skipped {
                             local_skipped += 1;
                         } else {
                             local_processed += 1;
                         }
-                        if portable_library::restore_media(
-                            &services.db,
-                            &services.cache_dir,
-                            &outcome.media_id,
-                            &path,
-                            file.file_size,
-                            Some(&file.fingerprint),
-                        )
-                        .is_err()
-                        {
-                            local_errors += 1;
-                        }
-                        if let Some(ffmpeg) = services.ffmpeg.as_deref() {
-                            {
-                                let mut p = services.progress.lock();
-                                p.message = Some("Generando portada y vista previa…".into());
-                                let _ = app.emit("scan-progress", p.clone());
-                            }
-                            match cinewana_scanner::generate_artwork(
-                                ffmpeg,
-                                &path,
-                                &services.cache_dir,
-                                &file.fingerprint,
-                                file.technical.duration_ms,
-                            )
-                            .await
-                            {
-                                Ok((poster, backdrop, preview)) => {
-                                    if services
-                                        .db
-                                        .set_artwork(
-                                            &outcome.media_id,
-                                            &poster.to_string_lossy(),
-                                            &backdrop.to_string_lossy(),
-                                            &preview.to_string_lossy(),
-                                        )
-                                        .is_err()
-                                    {
-                                        local_errors += 1;
-                                    }
-                                }
-                                Err(_) => local_errors += 1,
-                            }
-                        }
-                        if services.metadata.configured()
-                            && services
-                                .db
-                                .should_auto_import_metadata(&outcome.media_id)
-                                .unwrap_or(false)
-                        {
-                            if let Ok(Some(target)) = services.db.metadata_target(&outcome.media_id)
-                            {
-                                {
-                                    let mut p = services.progress.lock();
-                                    p.message = Some(format!(
-                                        "Buscando portada oficial: {}",
-                                        target.file_name
-                                    ));
-                                    let _ = app.emit("scan-progress", p.clone());
-                                }
-                                let _ = import_metadata_for_target(services, &target).await;
-                                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                            }
-                        }
-                        let _ = write_identification_cache(services, &outcome.media_id);
+                        local_errors +=
+                            finish_media(app, services, &outcome.media_id, &path, &file).await;
                     }
                     Err(_) => local_errors += 1,
                 },
@@ -1116,7 +1324,7 @@ async fn run_scan(app: &AppHandle, services: &AppServices, reason: &str) -> anyh
             }
         }
         let cancelled = services.cancel.load(Ordering::SeqCst);
-        services.db.finish_scan(
+        services.scan_db.finish_scan(
             &root_id,
             &scan_id,
             if cancelled { "cancelled" } else { "completed" },
@@ -1133,6 +1341,11 @@ async fn run_scan(app: &AppHandle, services: &AppServices, reason: &str) -> anyh
         }
     }
     let cancelled = services.cancel.load(Ordering::SeqCst);
+    /* La marca se guarda solo cuando el repaso llegó hasta el final. Si se canceló a la mitad, la
+       biblioteca quedó a medio revisar y conviene que el próximo arranque lo intente de nuevo. */
+    if !cancelled {
+        services.scan_db.set_last_full_scan_at(chrono::Utc::now())?;
+    }
     {
         let mut p = services.progress.lock();
         p.running = false;
@@ -1293,7 +1506,11 @@ pub fn run() {
             let app_data = app.path().app_data_dir()?;
             let resource_dir = app.path().resource_dir()?;
             let cache_dir = app_data.join("cache");
-            let db = Arc::new(Database::open(app_data.join("cine-wana.db"))?);
+            let database_path = app_data.join("cine-wana.db");
+            let db = Arc::new(Database::open(&database_path)?);
+            /* Segunda conexión al mismo archivo, para que el escaneo escriba por su lado y navegar
+               la biblioteca no quede esperando detrás de sus miles de escrituras chiquitas. */
+            let scan_db = Arc::new(Database::open(&database_path)?);
             db.rebase_tmdb_cache(&cache_dir)?;
             if db.enabled_roots_with_paths()?.is_empty() {
                 db.seed_root(DEFAULT_LIBRARY_ROOT)?;
@@ -1306,6 +1523,7 @@ pub fn run() {
             let media_stream = Arc::new(MediaStreamService::new()?);
             let services = AppServices {
                 db,
+                scan_db,
                 progress: Arc::new(Mutex::new(ScanProgress::default())),
                 running: Arc::new(AtomicBool::new(false)),
                 cancel: Arc::new(AtomicBool::new(false)),
@@ -1331,7 +1549,7 @@ pub fn run() {
                     let _ = startup_remote.start().await;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(450)).await;
-                spawn_scan(handle, services, "startup".into());
+                spawn_startup_work(handle, services);
             });
             Ok(())
         })

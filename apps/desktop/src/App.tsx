@@ -39,6 +39,9 @@ export function App() {
   const [home,setHome]=useState<HomeDto>(emptyHome);
   const [items,setItems]=useState<MediaSummary[]>([]);
   const [scan,setScan]=useState<ScanProgress>(emptyScan);
+  /* El repaso de la biblioteca corre solo cada tantos días. Sin este aviso terminaba en silencio y
+     el usuario no se enteraba nunca de que había pasado ni de qué encontró. */
+  const [scanNotice,setScanNotice]=useState('');
   const [search,setSearch]=useState('');
   const [heroIndex,setHeroIndex]=useState(0);
   const [detail,setDetail]=useState<MediaDetail|null>(null);
@@ -69,6 +72,7 @@ export function App() {
   },[]);
 
   useEffect(()=>{ void refresh(); const unsubs=[listen<ScanProgress>('scan-progress',e=>setScan(e.payload)),listen('library-changed',()=>void refresh())]; return()=>{void Promise.all(unsubs).then(values=>values.forEach(fn=>fn()));};},[refresh]);
+  useEffect(()=>{if(scan.running){setScanNotice('');return;}if(!scan.message)return;setScanNotice(scan.message);const timer=window.setTimeout(()=>setScanNotice(''),9000);return()=>window.clearTimeout(timer);},[scan.running,scan.message]);
   useEffect(()=>{let timer:number;const schedule=()=>{const now=new Date();const next=new Date(now);next.setHours(24,0,1,0);timer=window.setTimeout(()=>{void refresh();schedule();},next.getTime()-now.getTime());};schedule();return()=>window.clearTimeout(timer);},[refresh]);
   useEffect(()=>{let cleanup:(()=>void)|undefined;void listen<MetadataRefreshProgress>('metadata-refresh',event=>setMetadataRefresh(event.payload)).then(unlisten=>cleanup=unlisten);return()=>cleanup?.();},[]);
   useEffect(()=>{void invoke<RemoteStatus>('remote_status').then(setRemoteStatus).catch(()=>{});let cleanup:(()=>void)|undefined;void listen<RemoteStatus>('remote-status-changed',event=>setRemoteStatus(event.payload)).then(unlisten=>cleanup=unlisten);return()=>cleanup?.();},[]);
@@ -135,6 +139,7 @@ export function App() {
       </header>
 
       {scan.running&&<div className="scan-strip"><LoaderCircle className="spin" size={16}/><div><b>{scan.message||'Escaneando biblioteca'}</b><small>{scan.currentFile||`${scan.found} archivos encontrados`}</small></div><div className="scan-meter"><i style={{width:`${scan.percent}%`}}/></div><span>{Math.round(scan.percent)}%</span></div>}
+      {!scan.running&&scanNotice&&<div className="scan-strip done"><Check size={16}/><div><b>{scanNotice}</b><small>Se cierra solo</small></div><button className="scan-notice-close" onClick={()=>setScanNotice('')} aria-label="Cerrar aviso"><X size={15}/></button></div>}
       {error&&<div className="error-banner"><CircleAlert size={18}/><span>{error}</span><button onClick={()=>setError(null)}><X size={16}/></button></div>}
 
       {!boot?<Loading/>:page==='Configuración'&&settingsProps?<RemoteSettingsPage {...settingsProps}/>:page==='Series'?<SeriesPage series={home.series} search={search} openSeries={setSeriesDetail}/>:page==='Categorías'?<CategoriesPage categories={home.categories} onSelect={id=>{setCategory(id);setPage('Inicio');}}/>:page==='Sagas'?<SagasPage categories={home.categories} openSaga={setSagaDetail}/>:page==='Inicio'&&!search?<HomePage home={home} hero={hero} heroIndex={heroIndex} setHeroIndex={setHeroIndex} openDetail={openDetail} openSeries={setSeriesDetail} openSaga={setSagaDetail} setFlag={setFlag} playMedia={playMedia} category={category} setCategory={setCategory}/>:<CatalogPage title={page} items={visible} openDetail={openDetail} setFlag={setFlag} playMedia={playMedia}/>}

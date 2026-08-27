@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{Datelike, Local, Utc};
+use chrono::{DateTime, Datelike, Local, Utc};
 use cinewana_core::{
     AccountDto, CatalogQuery, CategoryKind, CategoryOption, CategoryPreference, CategoryRow,
     ClassificationUpdate, HomeDto, IdentificationReview, ImportedMediaMetadata, LibraryRootDto,
@@ -595,6 +595,13 @@ impl Database {
         })
     }
 
+    /// Marca como presente un archivo que no cambió de tamaño ni de fecha.
+    ///
+    /// `refresh_identification` rehace el título, la temporada y el episodio a partir del nombre.
+    /// Para un archivo idéntico eso da siempre el mismo resultado, así que el repaso automático lo
+    /// deja en falso: reescribirlo por cada película era lo que hacía sentir cada arranque como un
+    /// escaneo entero. El botón de reescanear lo pide en verdadero, que es cuando se busca forzar
+    /// una corrección.
     pub fn reconcile_unchanged_file(
         &self,
         scan_id: &str,
@@ -602,6 +609,7 @@ impl Database {
         file_size: i64,
         modified_at: i64,
         parsed: &ParsedMediaName,
+        refresh_identification: bool,
     ) -> Result<Option<UpsertOutcome>> {
         let now = Utc::now().to_rfc3339();
         let conn = self.connection.lock();
@@ -619,7 +627,9 @@ impl Database {
             "UPDATE media_files SET offline=0,last_seen_scan=?1,updated_at=?2 WHERE id=?3",
             params![scan_id, now, file_id],
         )?;
-        self.sync_identification_locked(&conn, &media_id, parsed, &now)?;
+        if refresh_identification {
+            self.sync_identification_locked(&conn, &media_id, parsed, &now)?;
+        }
         Ok(Some(UpsertOutcome {
             media_id,
             inserted: false,
@@ -776,6 +786,31 @@ impl Database {
             ],
         )?;
         transaction.commit()?;
+        Ok(())
+    }
+
+    /// Cierra un trabajo de bandeja sin el barrido que marca ausente lo que no se vio.
+    ///
+    /// La bandeja mira una sola carpeta, así que el resto de la biblioteca nunca aparece en el
+    /// trabajo. Usar `finish_scan` acá dejaría las 285 películas terminadas marcadas como ausentes
+    /// de un saque.
+    pub fn finish_ingest(
+        &self,
+        root_id: &str,
+        scan_id: &str,
+        processed: u64,
+        errors: u64,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.connection.lock();
+        conn.execute(
+            "UPDATE scan_jobs SET status='completed',found=?1,processed=?1,skipped=0,errors=?2,finished_at=?3 WHERE id=?4",
+            params![processed, errors, now, scan_id],
+        )?;
+        conn.execute(
+            "UPDATE library_roots SET status='online',updated_at=?1 WHERE id=?2",
+            params![now, root_id],
+        )?;
         Ok(())
     }
 
@@ -1613,11 +1648,21 @@ impl Database {
                 },
             )
             .optional()?;
-        let Some((manual, status, source_url, _checked_at, candidates_json, imported_at, people_json)) = row
+        let Some((manual, status, source_url, checked_at, candidates_json, imported_at, people_json)) = row
         else {
             return Ok(false);
         };
-        let missing_tmdb_people = status == "imported"
+        /* TMDB no tiene elenco para todos los títulos. Sin este freno, una ficha que el proveedor
+           devuelve sin actores queda pedida para siempre y se vuelve a consultar en cada arranque,
+           con la misma respuesta vacía, gastando red y demorando el escaneo sin arreglar nada. */
+        let checked_recently = checked_at
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .is_some_and(|checked| {
+                Utc::now().signed_duration_since(checked) < chrono::Duration::days(30)
+            });
+        let missing_tmdb_people = !checked_recently
+            && status == "imported"
             && source_url
                 .as_deref()
                 .is_some_and(|url| url.contains("themoviedb.org/"))
@@ -1828,6 +1873,38 @@ impl Database {
         let now = Utc::now().to_rfc3339();
         self.connection.lock().execute(
             "INSERT INTO settings(key,value_json,updated_at) VALUES('remote_auto_start',?1,?2) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
+            params![value, now],
+        )?;
+        Ok(())
+    }
+
+    /// Cuándo terminó el último repaso completo de la biblioteca.
+    ///
+    /// Abrir el programa ya no escanea: solo procesa la bandeja de películas nuevas. Este dato es
+    /// el que decide cuándo toca igual un repaso a fondo para enterarse de lo que se borró o se
+    /// movió a mano desde el Explorador.
+    pub fn last_full_scan_at(&self) -> Result<Option<DateTime<Utc>>> {
+        let stored = self
+            .connection
+            .lock()
+            .query_row(
+                "SELECT value_json FROM settings WHERE key='last_full_scan_at'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(stored
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<String>(value).ok())
+            .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
+            .map(|value| value.with_timezone(&Utc)))
+    }
+
+    pub fn set_last_full_scan_at(&self, moment: DateTime<Utc>) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let value = serde_json::to_string(&moment.to_rfc3339())?;
+        self.connection.lock().execute(
+            "INSERT INTO settings(key,value_json,updated_at) VALUES('last_full_scan_at',?1,?2) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
             params![value, now],
         )?;
         Ok(())
@@ -4010,7 +4087,7 @@ mod tests {
         assert!(db.identification_reviews().unwrap().is_empty());
 
         db.start_scan(&root, "scan-2", "test").unwrap();
-        db.reconcile_unchanged_file("scan-2", path, 10, 1, &parse_media_name(Path::new(path)))
+        db.reconcile_unchanged_file("scan-2", path, 10, 1, &parse_media_name(Path::new(path)), true)
             .unwrap()
             .unwrap();
         let account = db.create_account("Jael", "abcd1").unwrap();
@@ -4050,7 +4127,7 @@ mod tests {
         db.start_scan(&root, "scan-1", "test").unwrap();
         let original = db.upsert_file(&root, "scan-1", &file).unwrap();
 
-        db.reconcile_unchanged_file("scan-2", path, 10, 1, &parse_media_name(Path::new(path)))
+        db.reconcile_unchanged_file("scan-2", path, 10, 1, &parse_media_name(Path::new(path)), true)
             .unwrap()
             .unwrap();
 
@@ -4065,6 +4142,57 @@ mod tests {
         assert_eq!(item.series_title.as_deref(), Some("Frieren"));
         assert_eq!(item.season_number, Some(1));
         assert_eq!(item.episode_number, Some(1));
+    }
+
+    /// El repaso automático solo confirma que el archivo sigue en su lugar.
+    ///
+    /// Reescribir la ficha de cada película sin cambios era lo que hacía que abrir el programa
+    /// costara un escaneo entero, así que acá se comprueba que ya no la toca.
+    #[test]
+    fn the_periodic_pass_does_not_rewrite_a_finished_title() {
+        let db = Database::open(":memory:").unwrap();
+        let root = db.seed_root(r"D:\media").unwrap();
+        let path = r"D:\media\SERIES\Frieren\Temporada 1\Frieren 1.mkv";
+        let mut file = discovered_file(path, "untouched");
+        file.parsed = ParsedMediaName {
+            kind: MediaKind::Movie,
+            title: "Frieren 1".into(),
+            year: None,
+            series_title: None,
+            season_number: None,
+            episode_number: None,
+            identification_source: "filename".into(),
+            needs_review: false,
+            review_reason: None,
+        };
+        db.start_scan(&root, "scan-1", "test").unwrap();
+        let original = db.upsert_file(&root, "scan-1", &file).unwrap();
+
+        let outcome = db
+            .reconcile_unchanged_file(
+                "scan-2",
+                path,
+                10,
+                1,
+                &parse_media_name(Path::new(path)),
+                false,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.media_id, original.media_id);
+        assert!(outcome.skipped);
+
+        let account = db.create_account("Jael", "abcd1").unwrap();
+        let item = db
+            .catalog(Some(&account.id), &CatalogQuery::default())
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            item.kind,
+            MediaKind::Movie,
+            "el repaso automático no debe rehacer una ficha que ya estaba lista"
+        );
     }
 
     #[test]
@@ -4087,7 +4215,7 @@ mod tests {
         db.start_scan(&root, "scan-1", "test").unwrap();
         let original = db.upsert_file(&root, "scan-1", &file).unwrap();
 
-        db.reconcile_unchanged_file("scan-2", path, 10, 1, &parse_media_name(Path::new(path)))
+        db.reconcile_unchanged_file("scan-2", path, 10, 1, &parse_media_name(Path::new(path)), true)
             .unwrap()
             .unwrap();
 
