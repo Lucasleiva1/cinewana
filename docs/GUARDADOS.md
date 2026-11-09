@@ -5,6 +5,30 @@ El más reciente va arriba.
 
 ---
 
+## 0.4.0 — Reproductor nuevo con libmpv adentro de CINE WANA
+
+| Dato | Valor |
+|---|---|
+| **Número de versión** | `0.4.0` |
+| **Nombre del guardado** | CINE WANA v0.4.0 |
+| **Fecha** | lunes 9 de noviembre de 2026 |
+| **Hora** | 16:57:03 (hora de Buenos Aires, UTC-3) |
+| **Hora UTC** | 2026-11-09 19:57:03 UTC |
+| **Etiqueta** | `app-v0.4.0` |
+| **Commit** | `b98f17ec54afadf3bb90371c1f8ceff2e21f93a6` |
+| **Marcada como Latest** | Sí |
+| **Enlace** | https://github.com/Lucasleiva1/cinewana/releases/tag/app-v0.4.0 |
+
+**Qué trae:** el reproductor deja de usar el motor del navegador y pasa a libmpv (el motor de mpv),
+que viaja adentro del instalador en su versión LGPL sin AVX2 (la que soporta el Intel i7-3770). El
+video se dibuja dentro de la ventana, debajo de los mismos controles. Suma idioma del audio y
+subtítulos recordados por película; color, fuente (Montserrat incluida), altura, tamaño y
+sincronización de subtítulos; el minuto al pasar por la barra; un panel Imagen con los ajustes de mpv;
+pantalla completa nativa; y el botón "i" con los datos de la película. El reproductor anterior queda
+escondido como respaldo por si libmpv no arrancara. El instalador pasa a pesar 35,6 MB.
+
+---
+
 ## 0.3.12 — "Continuar viendo" con todas las películas
 
 | Dato | Valor |
