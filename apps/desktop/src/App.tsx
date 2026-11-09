@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { createPortal } from 'react-dom';
 import { open } from '@tauri-apps/plugin-dialog';
 import { check } from '@tauri-apps/plugin-updater';
 import {
@@ -150,13 +151,13 @@ export function App() {
     {sagaDetail&&<SagaDetailModal saga={sagaDetail} close={()=>setSagaDetail(null)} openDetail={openDetail} playMedia={playMedia}/>}
     {seriesDetail&&<SeriesDetailModal series={seriesDetail} close={()=>setSeriesDetail(null)} openDetail={openDetail} playMedia={playMedia} customCategories={home.customCategories} onToggleCategory={(id,member)=>setCategoryMember(id,member,undefined,seriesDetail.title)}/>}
     {detail&&<DetailModal detail={detail} review={boot?.identificationReviews.find(item=>item.mediaId===detail.id)} close={()=>setDetail(null)} setFlag={setFlag} playMedia={playMedia} openExternalMedia={openExternalMedia} onSaveMetadata={saveMetadata} onRefreshMetadata={refreshMetadata} onApplyCandidate={applyMetadataCandidate} onResolveIdentification={resolveIdentification} openDetail={openDetail} metadataLoading={metadataLoading} customCategories={home.customCategories} onToggleCategory={(id,member)=>setCategoryMember(id,member,detail.id)}/>}
-    {playerSource&&settingsProps&&<InternalPlayer
+    {playerSource&&<InternalPlayer
       source={playerSource}
       onClose={()=>setPlayerSource(null)}
       onOpenExternal={openExternalMedia}
       onPlayNext={playNextMedia}
       onProgressSaved={()=>void refresh()}
-      settingsPanel={<RemoteSettingsPage {...settingsProps}/>}
+      infoPanel={<PlayerInfoPanel detail={playerSource.detail}/>}
     />}
   </div></CarouselDragContext.Provider>;
 }
@@ -679,7 +680,7 @@ const reviewHasIssue=(review:IdentificationReview)=>review.identificationPending
 
 /* El reparto va primero porque es lo que se busca al abrir una ficha; direccion y guion despues.
    Sin foto se dibujan las iniciales: una silueta gris no dice nada. */
-function PeopleBlock({people,fallback,status,onReview}:{people:MediaPerson[];fallback:string[];status:string;onReview:()=>void}){
+function PeopleBlock({people,fallback,status,onReview}:{people:MediaPerson[];fallback:string[];status:string;onReview?:()=>void}){
   const [zoom,setZoom]=useState<{person:MediaPerson;note?:string}|null>(null);
   const openZoom=(person:MediaPerson,note?:string)=>setZoom({person,note});
   const crew=people.filter(person=>person.role!=='actor');
@@ -689,14 +690,16 @@ function PeopleBlock({people,fallback,status,onReview}:{people:MediaPerson[];fal
     return <div className="cast-block">
       <h3><Users size={15}/> Reparto</h3>
       {fallback.length>0&&<p>{fallback.join(', ')}</p>}
-      {problema
+      {problema&&onReview
         ?<button className="cast-problem" onClick={onReview}>
           <CircleAlert size={15}/>
           <span><b>{problema==='varias'?'Hay varias películas posibles':'No se encontró esta película'}</b>
           <small>{problema==='varias'?'TMDB no puede elegir sola. Abrí Revisión y marcá la correcta para traer el reparto.':'El nombre del archivo no alcanza. Abrí Revisión y corregí el título para traer el reparto.'}</small></span>
           <ChevronRight size={15}/>
         </button>
-        :<small className="cast-hint">Esta ficha se guardó antes de que existieran las fotos. Actualizala desde Configuración para verlas.</small>}
+        :problema
+          ?<small className="cast-hint">{problema==='varias'?'Hay varias películas posibles. Elegí la correcta desde la ficha, en Revisión, para traer el reparto.':'No se encontró esta película. Corregí el título desde la ficha, en Revisión, para traer el reparto.'}</small>
+          :<small className="cast-hint">Esta ficha se guardó antes de que existieran las fotos. Actualizala desde Configuración para verlas.</small>}
     </div>;
   }
   return <div className="cast-block">
@@ -728,7 +731,8 @@ function PersonZoom({person,note,close}:{person:MediaPerson;note?:string;close:(
     window.addEventListener('keydown',onKey);
     return()=>window.removeEventListener('keydown',onKey);
   },[close]);
-  return <div className="person-viewer" role="dialog" aria-modal="true" aria-label={`Foto de ${person.name}`} onMouseDown={event=>{if(event.target===event.currentTarget)close();}}>
+  const host=document.querySelector('.cw-player-shell')??document.body;
+  return createPortal(<div className="person-viewer" role="dialog" aria-modal="true" aria-label={`Foto de ${person.name}`} onMouseDown={event=>{if(event.target===event.currentTarget)close();}}>
     <figure className="person-viewer-card">
       <div className="person-viewer-photo" style={{'--person-hue':hueFor(person.name)} as React.CSSProperties}>
         <button ref={closeButtonRef} type="button" className="person-viewer-close" onClick={close} aria-label="Cerrar foto del actor" title="Cerrar">
@@ -743,6 +747,25 @@ function PersonZoom({person,note,close}:{person:MediaPerson;note?:string;close:(
         <small>Presioná Esc o hacé clic fuera de la foto para cerrar.</small>
       </figcaption>
     </figure>
+  </div>,host);
+}
+
+/* Ficha de solo lectura que se abre desde el reproductor: lo mismo que se ve al tocar el nombre,
+   sin botones de editar ni reproducir, para no sacar al usuario de la película. */
+function PlayerInfoPanel({detail}:{detail:MediaDetail}){
+  return <div className="player-info">
+    <div className="player-info-head">
+      <Poster title={displayTitle(detail)} label={detail.kind==='episode'?'SERIE':quality(detail)} src={detail.artworkUrl}/>
+      <div>
+        <span className="eyebrow">{detail.kind==='episode'?`${detail.seriesTitle??'SERIE'} · T${detail.seasonNumber} E${detail.episodeNumber}`:'PELÍCULA'}</span>
+        <h2>{displayTitle(detail)}</h2>
+        <div className="detail-meta"><span>{detail.year||'Sin año'}</span><span>{quality(detail)}</span>{detail.technical.hdrType&&<span>{detail.technical.hdrType}</span>}{detail.runtimeMs&&<span>{formatDuration(detail.runtimeMs)}</span>}</div>
+      </div>
+    </div>
+    <div className="genre-pills">{detail.genres.length?detail.genres.map(genre=><span key={genre}><Tags size={12}/>{genre}</span>):<span><Tags size={12}/>Sin género</span>}</div>
+    <h3>Historia</h3>
+    <p className="overview">{detail.overview||(detail.kind==='episode'?'Todavía no hay descripción para este episodio.':'Todavía no hay descripción para esta película.')}</p>
+    <PeopleBlock people={detail.people} fallback={detail.cast} status={detail.metadataStatus}/>
   </div>;
 }
 

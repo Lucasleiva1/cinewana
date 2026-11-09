@@ -753,3 +753,13 @@ button, input, textarea { min-width:0; }
   .person-viewer-card { width:min(360px,calc(100vw - 24px)); max-height:calc(100dvh - 24px); padding:12px; border-radius:14px; }
   .person-viewer-close { top:8px; right:8px; width:38px; height:38px; }
 }
+
+/* Ficha de la película dentro del reproductor (botón de datos, arriba a la derecha). */
+.player-info-head { display:grid; grid-template-columns:96px minmax(0,1fr); gap:14px; align-items:start; }
+.player-info-head .poster { border-radius:6px; }
+.player-info-head h2 { font-family:Oswald,Impact,sans-serif; text-transform:uppercase; letter-spacing:.4px; font-size:22px; line-height:1.1; margin:7px 0 10px; }
+.player-info .detail-meta { flex-wrap:wrap; }
+.player-info > h3 { font-family:Oswald,sans-serif; text-transform:uppercase; font-size:13px; margin:20px 0 0; color:#f6f3ee; }
+.player-info .overview { margin:8px 0 0; font-size:13px; color:#c4beb6; }
+.player-info .people-row { grid-template-columns:repeat(auto-fill,minmax(70px,1fr)); }
+.cw-player-shell > .person-viewer { z-index:40; }

@@ -255,6 +255,9 @@ export function installDevTauriMock() {
       }
       case 'technical_path':
         return 'D:\\peliculas-y-series\\sample.mp4';
+      case 'player_media_url':
+        // Sin archivo real: alcanza para abrir el reproductor y revisar sus paneles en el navegador.
+        return 'data:video/mp4;base64,';
       case 'rescan_media_item':
         return false;
       case 'analyze_media_image':
