@@ -162,7 +162,9 @@
 - Offline-capable PWA shell, responsive Android layout, reconnection, and local security hardening
 - Validation on desktop first, followed by same-network mobile testing before commit or packaging
 
-## In progress: libmpv internal player (branch `reproductor-mpv`)
+## libmpv internal player (version 0.4.0)
+
+- Prepared version 0.4.0 as the signed updater release that replaces the WebView player with libmpv inside the window; the previous player stays only as a hidden fallback
 
 - libmpv now travels inside CINE WANA: the LGPL x86_64 build without AVX2 is pinned in `scripts/libmpv.json`, fetched and checked by `scripts/setup-libmpv.ps1` (also run by `run-tauri.ps1`), kept out of git (it is ~97 MB) and bundled by Tauri as `mpv/libmpv-2.dll`
 - Before the DLL is loaded into the app it is probed in a separate process (`--cinewana-probar-libmpv`), so an incompatible build can never crash CINE WANA; if the probe fails the previous WebView player is used as a fallback
@@ -173,7 +175,8 @@
 - The FFmpeg scene scan is no longer offered in the libmpv player: it only displayed measurements (the suggested adjustment was already hidden) and paused the film every time the panel opened
 - Window fullscreen now uses the native `core:window:allow-set-fullscreen` permission so mpv follows the window
 - Brightness, shadows/highlights, temperature and sharpness run in a CINE WANA GLSL user shader (`cinewana-imagen.glsl`) on the GPU, with live parameters; black stays black
-- Pending before merging: real-film validation (H.264 MP4, H.265 MKV, dual audio, internal/external subtitles, fullscreen/resize, hardware decoding), an installer test without mpv on the machine, and removal of the fallback player once confirmed
+- Validated in the real window: H.264 MP4 with dual audio and internal subtitles, MKV with ASS subtitles, AV1 software decoding without dropped frames, d3d11va hardware decoding, fullscreen/resize, image controls measured frame by frame, subtitle color/font/height, close without flicker
+- Still pending: an H.265 title (none in the library), the phone remote and next-up handoff on the new player, the installed-build test without mpv.net on the machine, and removing the fallback player once confirmed
 
 ## Deferred
 
