@@ -503,6 +503,7 @@ dependencies = [
  "anyhow",
  "cinewana-core",
  "parking_lot",
+ "serde",
  "serde_json",
  "uuid",
 ]

@@ -1,4 +1,6 @@
 import { mockConvertFileSrc, mockIPC, mockWindows } from '@tauri-apps/api/mocks';
+import { emit } from '@tauri-apps/api/event';
+import type { EmbeddedState, EmbeddedTrack } from './embeddedPlayer';
 import type { Bootstrap, CategoryOption, CategoryPreference, CategoryRow, CategoryStyle, CustomCategory, HomeDto, MediaPerson, ImageAnalysis, MediaDetail, MediaSummary, SagaSummary, ScanProgress, SeriesSummary } from './types';
 
 const now = new Date().toISOString();
@@ -202,6 +204,64 @@ const imageAnalysis: ImageAnalysis = {
   suggested:{ brightness:3, contrast:8, saturation:6, shadows:6, highlights:-2, temperature:-3 }
 };
 
+/* Simulación del reproductor con libmpv para revisar la interfaz en el navegador (sin video real). */
+const mockTrack = (partial: Partial<EmbeddedTrack> & Pick<EmbeddedTrack, 'id' | 'kind'>): EmbeddedTrack => ({
+  external:false, selected:false, defaultTrack:false, forced:false, hearingImpaired:false, ...partial,
+});
+const mockEngine: { session:number; timer?:number; state?:EmbeddedState } = { session:0 };
+const pushEngine = () => { if (mockEngine.state) void emit('embedded-player-state', { ...mockEngine.state }); };
+function openMockEngine(start:number) {
+  if (mockEngine.timer) window.clearInterval(mockEngine.timer);
+  mockEngine.session += 1;
+  mockEngine.state = {
+    session:mockEngine.session, loaded:true, videoReady:true, position:start, duration:7200, paused:false, ended:false,
+    buffering:false, volume:0.5, muted:false, speed:1, audioId:1, subtitleId:null, subtitleScale:1, subtitleDelay:0,
+    subtitleStyle:{ color:'blanco', font:'clasica', position:100 },
+    hardwareDecoder:'d3d11va', error:null,
+    tracks:[
+      mockTrack({ id:1, kind:'video', codec:'hevc', selected:true }),
+      mockTrack({ id:1, kind:'audio', language:'spa', title:'Latino', codec:'ac3', channels:6, defaultTrack:true, selected:true }),
+      mockTrack({ id:2, kind:'audio', language:'eng', title:'English', codec:'eac3', channels:6 }),
+      mockTrack({ id:3, kind:'audio', language:'por', codec:'aac', channels:2 }),
+      mockTrack({ id:1, kind:'sub', language:'spa', title:'Forzados', codec:'subrip', forced:true }),
+      mockTrack({ id:2, kind:'sub', language:'spa', codec:'subrip' }),
+      mockTrack({ id:3, kind:'sub', language:'eng', codec:'hdmv_pgs_subtitle' }),
+      mockTrack({ id:4, kind:'sub', language:'spa', codec:'subrip', external:true }),
+    ],
+  };
+  mockEngine.timer = window.setInterval(() => {
+    const state = mockEngine.state;
+    if (!state || state.paused || state.ended) return;
+    state.position = Math.min(state.duration, state.position + 0.5 * state.speed);
+    state.ended = state.position >= state.duration;
+    pushEngine();
+  }, 500);
+  window.setTimeout(pushEngine, 60);
+  return mockEngine.session;
+}
+function commandMockEngine(command: Record<string, unknown>) {
+  const state = mockEngine.state;
+  if (!state) return null;
+  const select = (kind:string, id:number|null) => { state.tracks = state.tracks.map(track => track.kind === kind ? { ...track, selected:track.id === id } : track); };
+  switch (command.type) {
+    case 'set_pause': state.paused = Boolean(command.paused); break;
+    case 'seek_to': state.position = Number(command.seconds); state.ended = false; break;
+    case 'seek_by': state.position = Math.max(0, state.position + Number(command.seconds)); break;
+    case 'set_speed': state.speed = Number(command.speed); break;
+    case 'set_volume': state.volume = Number(command.volume); break;
+    case 'set_muted': state.muted = Boolean(command.muted); break;
+    case 'set_audio_track': state.audioId = Number(command.id); select('audio', Number(command.id)); break;
+    case 'set_subtitle_track': state.subtitleId = command.id === null ? null : Number(command.id); select('sub', state.subtitleId ?? null); break;
+    case 'set_subtitle_scale': state.subtitleScale = Number(command.scale); break;
+    case 'set_subtitle_delay': state.subtitleDelay = Number(command.seconds); break;
+    case 'set_subtitle_position': break;
+    case 'set_subtitle_style': state.subtitleStyle = command.style as EmbeddedState['subtitleStyle']; break;
+    default: return null;
+  }
+  pushEngine();
+  return null;
+}
+
 export function installDevTauriMock() {
   mockWindows('main');
   mockConvertFileSrc('windows');
@@ -255,6 +315,16 @@ export function installDevTauriMock() {
       }
       case 'technical_path':
         return 'D:\\peliculas-y-series\\sample.mp4';
+      case 'embedded_player_status':
+        return { available:true, message:null };
+      case 'embedded_player_open':
+        return openMockEngine(Number((args as { startSeconds?: number }).startSeconds ?? 0));
+      case 'embedded_player_command':
+        return commandMockEngine((args as { command: Record<string, unknown> }).command);
+      case 'embedded_player_stop':
+        if (mockEngine.timer) window.clearInterval(mockEngine.timer);
+        mockEngine.state = undefined;
+        return null;
       case 'player_media_url':
         // Sin archivo real: alcanza para abrir el reproductor y revisar sus paneles en el navegador.
         return 'data:video/mp4;base64,';

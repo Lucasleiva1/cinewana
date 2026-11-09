@@ -1,0 +1,15 @@
+CINE WANA incluye libmpv (libmpv-2.dll), el motor de reproducción del proyecto mpv.
+
+Versión: mpv v0.42.0-19-ga61f6c3ab, compilación LGPL para Windows x86_64 (sin AVX2),
+publicada por el proyecto mpv-winbuild:
+https://github.com/zhongfly/mpv-winbuild/releases/tag/2026-11-09-a61f6c3abd
+
+Licencia: GNU Lesser General Public License, versión 2.1 o posterior (ver LICENSE-LGPL-2.1.txt).
+La compilación incluye FFmpeg, libplacebo y otras bibliotecas bajo licencias compatibles con LGPL.
+
+Código fuente de mpv: https://github.com/mpv-player/mpv/tree/a61f6c3abd
+Código fuente de la compilación: https://github.com/zhongfly/mpv-winbuild
+
+CINE WANA carga libmpv-2.dll como biblioteca dinámica y no la modifica. Se puede reemplazar por
+otra compilación compatible de libmpv copiando un archivo libmpv-2.dll nuevo en la carpeta "mpv"
+de la instalación.

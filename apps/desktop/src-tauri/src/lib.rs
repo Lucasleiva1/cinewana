@@ -1,3 +1,4 @@
+mod embedded_player;
 mod ingest;
 mod media_stream;
 pub mod portable_library;
@@ -44,6 +45,8 @@ struct AppServices {
     cache_dir: PathBuf,
     metadata: Arc<TmdbMetadataClient>,
     player: Arc<PlayerService>,
+    /// Reproductor con libmpv dentro de la ventana (el motor viaja adentro de CINE WANA).
+    embedded: Arc<embedded_player::EmbeddedPlayerHost>,
     media_stream: Arc<MediaStreamService>,
     remote: Arc<RemoteService>,
     /// Guard so two bulk sheet refreshes cannot run at once.
@@ -1513,6 +1516,13 @@ fn cache_manual_artwork(
     Ok(destination.to_string_lossy().into_owned())
 }
 
+/// Si CINE WANA se abrió solo para probar libmpv (ver `embedded_player`), hace la prueba y
+/// devuelve el código de salida sin abrir ninguna ventana.
+pub fn run_libmpv_probe_if_requested() -> Option<i32> {
+    let arguments: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    embedded_player::run_probe(&arguments)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1547,6 +1557,11 @@ pub fn run() {
                 cache_dir,
                 metadata: Arc::new(TmdbMetadataClient::from_environment()?),
                 player: Arc::new(PlayerService::discover()),
+                embedded: Arc::new(embedded_player::EmbeddedPlayerHost::new(
+                    app.handle().clone(),
+                    &resource_dir,
+                    app_data.join("mpv"),
+                )),
                 media_stream,
                 remote: remote.clone(),
                 metadata_refreshing: Arc::new(AtomicBool::new(false)),
@@ -1613,7 +1628,11 @@ pub fn run() {
             remote_approve_pairing,
             remote_reject_pairing,
             remote_revoke_device,
-            remote_update_player_state
+            remote_update_player_state,
+            embedded_player::embedded_player_status,
+            embedded_player::embedded_player_open,
+            embedded_player::embedded_player_command,
+            embedded_player::embedded_player_stop
         ])
         .run(tauri::generate_context!())
         .expect("error while running CINE WANA");

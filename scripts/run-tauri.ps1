@@ -17,4 +17,6 @@ if (Test-Path -LiteralPath $envFile) {
 }
 
 Set-Location -LiteralPath $projectRoot
+# libmpv va adentro de CINE WANA: sin ella el instalador saldría sin motor de reproducción.
+& (Join-Path $PSScriptRoot 'setup-libmpv.ps1')
 corepack.cmd pnpm --filter @cine-wana/desktop tauri $Mode

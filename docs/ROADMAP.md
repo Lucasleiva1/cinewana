@@ -129,7 +129,7 @@
 
 - File-system watcher/debounce and scan concurrency tuning
 - Local NFO/images and optional manual image overrides beyond the completed TMDB poster workflow
-- Fine-grained audio/subtitle selectors and persisted image profiles
+- Persisted, named image profiles (the libmpv player already has every control; profiles are not stored yet)
 - Final visual refinements after the functional player is reviewed
 - Backup/export diagnostics and hardening
 
@@ -161,6 +161,19 @@
 - Remote library mirrors the desktop movie rotation and exposes series as series → seasons → episodes, with episode artwork, description, details, and play actions
 - Offline-capable PWA shell, responsive Android layout, reconnection, and local security hardening
 - Validation on desktop first, followed by same-network mobile testing before commit or packaging
+
+## In progress: libmpv internal player (branch `reproductor-mpv`)
+
+- libmpv now travels inside CINE WANA: the LGPL x86_64 build without AVX2 is pinned in `scripts/libmpv.json`, fetched and checked by `scripts/setup-libmpv.ps1` (also run by `run-tauri.ps1`), kept out of git (it is ~97 MB) and bundled by Tauri as `mpv/libmpv-2.dll`
+- Before the DLL is loaded into the app it is probed in a separate process (`--cinewana-probar-libmpv`), so an incompatible build can never crash CINE WANA; if the probe fails the previous WebView player is used as a fallback
+- `crates/cinewana-player/src/embedded.rs` drives libmpv through its C API (FFI): `wid` embedding inside the main window, `vo=gpu-next` + `hwdec=auto-safe`, observed properties and events pushed to the UI as `embedded-player-state`
+- The main window is transparent and the page turns transparent only while the player is open, so mpv renders under the same React controls (top bar, transport, volume with boost, info panel, next-up, remote control)
+- New: audio-language and subtitle selection (internal and external files, size and sync), remembered per title; subtitles rise above the controls while they are visible; minute tooltip on the progress bar
+- The Image panel is rebuilt around mpv: light and color (brightness, contrast, saturation, gamma, hue, temperature), shading (shadows, highlights), detail (sharpness, Normal/Alta calidad/Suave scaling, anti-ringing), cleanup (debanding with strength, deinterlacing), smooth motion (interpolation with display-resample), framing (fill screen, aspect override, zoom, rotation) and an HDR section shown only for HDR titles (tone mapping, per-scene peak detection), plus **Ver original** and Reset. Only changed properties are sent to mpv
+- The FFmpeg scene scan is no longer offered in the libmpv player: it only displayed measurements (the suggested adjustment was already hidden) and paused the film every time the panel opened
+- Window fullscreen now uses the native `core:window:allow-set-fullscreen` permission so mpv follows the window
+- Brightness, shadows/highlights, temperature and sharpness run in a CINE WANA GLSL user shader (`cinewana-imagen.glsl`) on the GPU, with live parameters; black stays black
+- Pending before merging: real-film validation (H.264 MP4, H.265 MKV, dual audio, internal/external subtitles, fullscreen/resize, hardware decoding), an installer test without mpv on the machine, and removal of the fallback player once confirmed
 
 ## Deferred
 

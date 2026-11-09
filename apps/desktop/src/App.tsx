@@ -13,6 +13,8 @@ import {
 } from 'lucide-react';
 import type { Bootstrap, CategoryKind, CategoryOption, CategoryPreference, CategoryRow, CategoryStyle, CustomCategory, MediaPerson, MetadataRefreshProgress, ClassificationUpdate, HomeDto, IdentificationReview, MediaDetail, MediaMetadataCandidate, MediaMetadataUpdate, MediaSummary, RemoteCommand, RemoteStatus, SagaSummary, ScanProgress, SeriesSummary } from './types';
 import { InternalPlayer, type InternalPlayerSource } from './InternalPlayer';
+import { MpvPlayer } from './MpvPlayer';
+import type { EmbeddedStatus } from './embeddedPlayer';
 import { countLibrary } from './libraryCounts';
 import tmdbLogo from './tmdb-logo.svg';
 
@@ -51,6 +53,8 @@ export function App() {
   const [category,setCategory]=useState<string|null>(null);
   const [metadataRefresh,setMetadataRefresh]=useState<MetadataRefreshProgress|null>(null);
   const [playerSource,setPlayerSource]=useState<InternalPlayerSource|null>(null);
+  /* null mientras se prueba libmpv al arrancar; false si no está y hay que usar el reproductor anterior. */
+  const [mpvReady,setMpvReady]=useState<boolean|null>(null);
   const [availableUpdate,setAvailableUpdate]=useState<PendingUpdate|null>(null);
   const [updateMessage,setUpdateMessage]=useState<string|null>(null);
   const [updating,setUpdating]=useState(false);
@@ -72,6 +76,7 @@ export function App() {
     } catch (cause) { setError(String(cause)); }
   },[]);
 
+  useEffect(()=>{invoke<EmbeddedStatus>('embedded_player_status').then(status=>{setMpvReady(status.available);if(!status.available)console.warn('Reproductor con libmpv no disponible:',status.message);}).catch(()=>setMpvReady(false));},[]);
   useEffect(()=>{ void refresh(); const unsubs=[listen<ScanProgress>('scan-progress',e=>setScan(e.payload)),listen('library-changed',()=>void refresh())]; return()=>{void Promise.all(unsubs).then(values=>values.forEach(fn=>fn()));};},[refresh]);
   useEffect(()=>{if(scan.running){setScanNotice('');return;}if(!scan.message)return;setScanNotice(scan.message);const timer=window.setTimeout(()=>setScanNotice(''),9000);return()=>window.clearTimeout(timer);},[scan.running,scan.message]);
   useEffect(()=>{let timer:number;const schedule=()=>{const now=new Date();const next=new Date(now);next.setHours(24,0,1,0);timer=window.setTimeout(()=>{void refresh();schedule();},next.getTime()-now.getTime());};schedule();return()=>window.clearTimeout(timer);},[refresh]);
@@ -151,7 +156,16 @@ export function App() {
     {sagaDetail&&<SagaDetailModal saga={sagaDetail} close={()=>setSagaDetail(null)} openDetail={openDetail} playMedia={playMedia}/>}
     {seriesDetail&&<SeriesDetailModal series={seriesDetail} close={()=>setSeriesDetail(null)} openDetail={openDetail} playMedia={playMedia} customCategories={home.customCategories} onToggleCategory={(id,member)=>setCategoryMember(id,member,undefined,seriesDetail.title)}/>}
     {detail&&<DetailModal detail={detail} review={boot?.identificationReviews.find(item=>item.mediaId===detail.id)} close={()=>setDetail(null)} setFlag={setFlag} playMedia={playMedia} openExternalMedia={openExternalMedia} onSaveMetadata={saveMetadata} onRefreshMetadata={refreshMetadata} onApplyCandidate={applyMetadataCandidate} onResolveIdentification={resolveIdentification} openDetail={openDetail} metadataLoading={metadataLoading} customCategories={home.customCategories} onToggleCategory={(id,member)=>setCategoryMember(id,member,detail.id)}/>}
-    {playerSource&&<InternalPlayer
+    {playerSource&&mpvReady===true&&<MpvPlayer
+      source={playerSource}
+      onClose={()=>setPlayerSource(null)}
+      onOpenExternal={openExternalMedia}
+      onPlayNext={playNextMedia}
+      onProgressSaved={()=>void refresh()}
+      infoPanel={<PlayerInfoPanel detail={playerSource.detail}/>}
+    />}
+    {/* Respaldo: el reproductor anterior, solo si libmpv no pudo arrancar en esta computadora. */}
+    {playerSource&&mpvReady===false&&<InternalPlayer
       source={playerSource}
       onClose={()=>setPlayerSource(null)}
       onOpenExternal={openExternalMedia}

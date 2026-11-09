@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "CINE WANA desktop permissions",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save", "updater:default"]
+  "permissions": ["core:default", "core:window:allow-set-fullscreen", "dialog:allow-open", "dialog:allow-save", "updater:default"]
 }

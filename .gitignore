@@ -13,5 +13,6 @@ artifacts/releases/
 .env
 apps/desktop/src-tauri/gen/
 apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/lib/libmpv-2.dll
 outputs/*.exe
 outputs/*.msi

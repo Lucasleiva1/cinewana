@@ -1,3 +1,5 @@
+pub mod embedded;
+
 use anyhow::{Context, Result};
 use cinewana_core::{ImageProfile, PlayerCommand, PlayerState};
 use parking_lot::Mutex;

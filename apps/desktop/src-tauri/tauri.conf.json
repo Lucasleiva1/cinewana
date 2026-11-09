@@ -19,7 +19,7 @@
       "center": true,
       "decorations": true,
       "resizable": true,
-      "backgroundColor": "#111111"
+      "transparent": true
     }],
     "security": {
       "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost https://asset.localhost https://image.tmdb.org blob: data:; media-src 'self' asset: http://asset.localhost https://asset.localhost http://127.0.0.1:* blob:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost http://127.0.0.1:*",
@@ -30,7 +30,14 @@
     "active": true,
     "createUpdaterArtifacts": true,
     "targets": ["nsis"],
-    "resources": { "../../remote/dist/": "remote/" },
+    "resources": {
+      "../../remote/dist/": "remote/",
+      "lib/libmpv-2.dll": "mpv/libmpv-2.dll",
+      "lib/LICENSE-LGPL-2.1.txt": "mpv/LICENSE-LGPL-2.1.txt",
+      "lib/AVISO-LIBMPV.txt": "mpv/AVISO-LIBMPV.txt",
+      "lib/fonts/Montserrat-SemiBold.ttf": "mpv/fonts/Montserrat-SemiBold.ttf",
+      "lib/fonts/OFL-Montserrat.txt": "mpv/fonts/OFL-Montserrat.txt"
+    },
     "shortDescription": "Tu biblioteca privada de peliculas y series",
     "windows": {
       "nsis": { "installMode": "currentUser", "languages": ["Spanish"] },

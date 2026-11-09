@@ -1,0 +1,10 @@
+{
+  "description": "libmpv que va adentro de CINE WANA. Compilación LGPL x86_64 sin AVX2 (no la v3): el Intel i7-3770 no tiene AVX2.",
+  "mpvVersion": "mpv v0.42.0-19-ga61f6c3ab",
+  "license": "LGPL-2.1-or-later (compilada con -Dgpl=false)",
+  "release": "https://github.com/zhongfly/mpv-winbuild/releases/tag/2026-11-09-a61f6c3abd",
+  "archiveUrl": "https://github.com/zhongfly/mpv-winbuild/releases/download/2026-11-09-a61f6c3abd/mpv-dev-lgpl-x86_64-20261109-git-a61f6c3abd.7z",
+  "archiveSha256": "a981f848c79859a8bb48c24f817b80784dbf0d06d4bd24336b9bd6a06ac05d9c",
+  "dllSha256": "e3a0cf0fd21ed526524dd2d7f08f795d188de29392310e734b3aa86e76452c01",
+  "sourceCode": "https://github.com/mpv-player/mpv/tree/a61f6c3abd"
+}
