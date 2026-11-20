@@ -90,6 +90,7 @@ export function MpvPlayer({
   const [image, setImage] = useState<MpvImage>(NEUTRAL_IMAGE);
   const [showOriginal, setShowOriginal] = useState(false);
   const [nextUp, setNextUp] = useState<MediaSummary | null>(null);
+  const [nextUpLoaded, setNextUpLoaded] = useState(false);
   const [nextPromptVisible, setNextPromptVisible] = useState(false);
   const [nextDismissed, setNextDismissed] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -416,6 +417,7 @@ export function MpvPlayer({
     setScrubSeconds(null);
     setError(null);
     setNextUp(null);
+    setNextUpLoaded(false);
     setNextPromptVisible(false);
     setNextDismissed(false);
     setShowOriginal(false);
@@ -525,13 +527,15 @@ export function MpvPlayer({
       return;
     }
     if (endedHandledRef.current) return;
+    // La consulta puede terminar después del EOF, por ejemplo al adelantar hasta el final.
+    if (!nextUpLoaded) return;
     endedHandledRef.current = true;
     if (shouldAutoplayNextUp(Boolean(nextUp), nextDismissed)) {
       void startNextUp();
     } else {
       void saveProgress(true);
     }
-  }, [engine?.ended, nextDismissed, nextUp, saveProgress, startNextUp]);
+  }, [engine?.ended, nextDismissed, nextUp, nextUpLoaded, saveProgress, startNextUp]);
 
   useEffect(() => {
     const height = source.detail.technical.height;
@@ -686,8 +690,8 @@ export function MpvPlayer({
   useEffect(() => {
     let cancelled = false;
     invoke<MediaSummary | null>('next_up', { mediaId: source.detail.id })
-      .then(next => { if (!cancelled) setNextUp(next); })
-      .catch(() => { if (!cancelled) setNextUp(null); });
+      .then(next => { if (!cancelled) { setNextUp(next); setNextUpLoaded(true); } })
+      .catch(() => { if (!cancelled) { setNextUp(null); setNextUpLoaded(true); } });
     return () => { cancelled = true; };
   }, [source.detail.id]);
 

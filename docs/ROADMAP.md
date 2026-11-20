@@ -1,5 +1,11 @@
 # Roadmap
 
+## Version 0.4.1
+
+- Restored the next-movie recommendation during the final two minutes, with countdown, play-now and cancel actions.
+- Fixed native autoplay at EOF: wait for pending recommendations, clear inherited pause and refresh video readiness when reusing the video output.
+- Verified countdown and automatic transition in the native Windows app; installation of the signed update is performed by the owner.
+
 ## Completed for the development preview
 
 - Windows/Tauri monorepo and reproducible pnpm/Rust toolchain
@@ -39,7 +45,8 @@
 - Opening Image now starts its scan automatically from both the desktop player and the local-network remote control
 - Reworked shadows/highlights adjustment as a tonal curve so shadow correction no longer washes the whole frame white
 - Added automatic numbered movie-sequel handoff for local sagas, with a cancellable next-up prompt near the end of playback
-- The next-content offer now appears during the final 60 seconds with explicit **Play now** and **Cancel** actions on both desktop and remote; cancellation hides the offer and disables autoplay
+- The next-content offer appears during the final 120 seconds with explicit **Play now** and **Cancel** actions on both desktop and remote; cancellation hides the offer and disables autoplay. The native player also waits for a pending recommendation at EOF before deciding whether to advance, preserving autoplay when the lookup finishes late.
+- Native autoplay clears the EOF pause again when the next file finishes loading and refreshes video readiness on reconfiguration, so the recommendation starts visibly even when mpv reuses its configured video output.
 - The next-content offer no longer pins the rest of the player interface: after mouse inactivity, the top bar, playback controls, central play button, and pointer disappear while the recommendation remains visible; moving the mouse reveals the controls again
 - Series now advance to the next numbered episode across seasons, while movies recommend a genre/year-related title with no progress in the active account
 - Prepared version 0.2.0 as an important signed updater release for the internal-player image correction workflow

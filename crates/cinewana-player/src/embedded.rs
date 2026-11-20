@@ -867,6 +867,9 @@ fn event_loop(
                 }
             }
             EVENT_FILE_LOADED => {
+                // keep-open pausa en EOF; quitar la pausa antes de loadfile puede aplicarse
+                // todavía al archivo anterior. La nueva película debe arrancar ya cargada.
+                let _ = core.set_property("pause", "no");
                 {
                     let mut shared = shared.lock();
                     shared.state.loaded = true;
@@ -887,7 +890,14 @@ fn event_loop(
                     urgent = true;
                 }
             }
-            EVENT_VIDEO_RECONFIG => keep_video_below_interface(window_handle),
+            EVENT_VIDEO_RECONFIG => {
+                keep_video_below_interface(window_handle);
+                // El VO puede seguir configurado entre películas: en ese caso mpv no vuelve
+                // a notificar un cambio de vo-configured, pero reiniciamos nuestro estado.
+                shared.lock().state.video_ready =
+                    core.get_string("vo-configured").as_deref() == Some("yes");
+                urgent = true;
+            }
             _ => {}
         }
         if urgent || (position_pending && last_emit.elapsed() >= POSITION_EMIT_INTERVAL) {
