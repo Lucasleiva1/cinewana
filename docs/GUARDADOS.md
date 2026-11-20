@@ -5,6 +5,45 @@ El más reciente va arriba.
 
 ---
 
+## 0.4.1 — Recomendación con cuenta regresiva y avance automático
+
+| Dato | Valor |
+|---|---|
+| **Número de versión** | `0.4.1` |
+| **Nombre del guardado** | CINE WANA v0.4.1 |
+| **Fecha** | viernes 20 de noviembre de 2026 |
+| **Hora** | 17:08:40 (hora de Buenos Aires, UTC-3) |
+| **Hora UTC** | 2026-11-20 20:08:40 UTC |
+| **Etiqueta** | `app-v0.4.1` |
+| **Commit** | `43bd536` |
+| **Marcada como Latest** | Sí |
+| **Enlace** | https://github.com/Lucasleiva1/cinewana/releases/tag/app-v0.4.1 |
+
+**Qué trae:** el cartel recomienda una película similar en los últimos dos minutos y cuenta
+hasta el final del archivo. Si no se cancela, reproduce la recomendada después de los créditos.
+Se corrigieron las recomendaciones que llegan después del fin, la pausa heredada de la película
+anterior y la pantalla de carga que tapaba la imagen cuando mpv reutilizaba su salida de video.
+
+**Archivos publicados:**
+
+| Archivo | Tamaño |
+|---|---|
+| `CINE.WANA_0.4.1_x64-setup.exe` | 37.307.417 bytes |
+| `CINE.WANA_0.4.1_x64-setup.exe.sig` | 420 bytes |
+| `CINE.WANA-v0.4.1-updater.json` | 1.492 bytes |
+| `latest.json` (alias técnico) | 1.492 bytes |
+
+**Huella del instalador (SHA256):**
+`0FD2F2A9C0FF9163802BB0BBF262C20BE79A764B41B28C4A70A5F2D6032C33F9`
+
+**Verificado:** 85 pruebas Rust y 26 de interfaz, lint, TypeScript y compilación de producción.
+Cuenta regresiva y cambio automático comprobados en la aplicación nativa con la biblioteca real.
+Firma criptográfica del instalador verificada con la clave pública incorporada; SHA256 publicado
+coincide con el archivo local. El endpoint oficial devuelve HTTP 200, versión 0.4.1, sin BOM,
+con ambas plataformas y sus firmas. La instalación de la actualización queda a cargo del usuario.
+
+---
+
 ## 0.4.0 — Reproductor nuevo con libmpv adentro de CINE WANA
 
 | Dato | Valor |
